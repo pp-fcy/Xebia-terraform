@@ -1,0 +1,75 @@
+##############################################################################
+# release.yml – Blue/green deploy entry point
+#
+# Called automatically by build-image.yml after a successful image build,
+# or manually for re-deploys and rollbacks.
+#
+# Triggers:
+#   • workflow_dispatch – pass image_ref to deploy, or rollback_image to roll back.
+#
+# The actual blue/green Terraform logic lives in terraform.yml (deploy/rollback jobs).
+##############################################################################
+name: Release
+
+# No top-level concurrency here: adding one causes a GitHub deadlock when this workflow
+# calls terraform.yml via workflow_call (parent holds the group, child can't acquire it).
+# Serialisation is guaranteed by build-image.yml (which holds terraform-production until
+# it finishes before triggering this workflow). Terraform state locking is the backstop
+# for any concurrent manual triggers.
+on:
+  workflow_dispatch:
+    inputs:
+      image_ref:
+        description: "Full image reference to deploy (e.g. .../what-time-is-it:sha-abc). Set by build-image.yml automatically."
+        required: false
+        type: string
+      rollback_image:
+        description: "Image to roll back to. If set, rolls back both regions immediately."
+        required: false
+        type: string
+
+jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref:      ${{ steps.resolve.outputs.image_ref }}
+      rollback_image: ${{ steps.resolve.outputs.rollback_image }}
+
+    steps:
+      - name: Resolve and validate image reference
+        id: resolve
+        run: |
+          IMAGE_REF="${{ inputs.image_ref }}"
+          ROLLBACK="${{ inputs.rollback_image }}"
+
+          if [[ -z "$IMAGE_REF" && -z "$ROLLBACK" ]]; then
+            echo "::error::Provide either image_ref (deploy) or rollback_image (rollback)."
+            echo "  This workflow is normally triggered automatically by build-image.yml."
+            exit 1
+          fi
+
+          # Write to GITHUB_OUTPUT so the deploy job can forward the values
+          # via needs.validate.outputs — the only reliable way to pass
+          # workflow_dispatch inputs through a workflow_call with: block.
+          echo "image_ref=${IMAGE_REF}"      >> "$GITHUB_OUTPUT"
+          echo "rollback_image=${ROLLBACK}"  >> "$GITHUB_OUTPUT"
+
+          if [[ -n "$ROLLBACK" ]]; then
+            echo "Mode: rollback → ${ROLLBACK}"
+          else
+            echo "Mode: deploy  → ${IMAGE_REF}"
+          fi
+
+  deploy:
+    name: Blue/Green deploy
+    needs: validate
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform.yml
+    with:
+      image_ref:      ${{ needs.validate.outputs.image_ref }}
+      rollback_image: ${{ needs.validate.outputs.rollback_image }}
+    secrets: inherit

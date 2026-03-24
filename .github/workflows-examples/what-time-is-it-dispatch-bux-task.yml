@@ -1,0 +1,51 @@
+##############################################################################
+# EXAMPLE — App repo dispatch trigger (alternative approach)
+#
+# This file is an EXAMPLE only. It lives in .github/workflows-examples/ and
+# is NOT executed by BUX-task. The current working setup builds images from
+# the what-time-is-it/ directory committed directly in BUX-task.
+#
+# ─── When to use this instead ───────────────────────────────────────────────
+#
+# If you have permission to add secrets and workflows to the app repo
+# (buxapp/what-time-is-it), copy this file there as:
+#   .github/workflows/dispatch-bux-task.yml
+#
+# On each push to main/master it notifies BUX-task via repository_dispatch.
+# BUX-task's build-image.yml picks up the event and triggers Cloud Build +
+# Terraform deploy automatically — no polling needed.
+#
+# ─── One-time setup (in the app repo) ───────────────────────────────────────
+#
+#  GitHub Secrets (app repo → Settings → Secrets and variables → Actions → Secrets)
+#  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+#  BUX_TEST_DISPATCH_TOKEN  fine-grained PAT with Contents: write on BUX-task
+#                            (needed to call repository_dispatch on BUX-task)
+#
+#  Edit `repository:` below to point at YOUR BUX-task fork (org/repo).
+#
+#  No GCP credentials needed in the app repo — BUX-task handles the build.
+##############################################################################
+
+name: Notify DevOps pipeline
+
+on:
+  push:
+    branches: [master, main]
+
+jobs:
+  dispatch:
+    name: Dispatch to BUX-task
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch to BUX-task
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.BUX_TEST_DISPATCH_TOKEN }}
+          repository: pp-fcy/BUX-task       # ← change to your BUX-task fork
+          event-type: what-time-is-it-updated
+          # sha is used by build-image.yml to tag the image
+          client-payload: |
+            {
+              "sha": "${{ github.sha }}"
+            }

@@ -1,0 +1,2 @@
+# Local development: pre-commit hooks
+pre-commit>=3.5,<5

@@ -1,0 +1,15 @@
+##############################################################################
+# Dev remote state – terraform/env/dev.backend.hcl.example
+#
+# Copy and fill in for local development:
+#   cp env/dev.backend.hcl.example env/dev.backend.hcl   # (not committed)
+#
+# Uses a separate prefix from prod so dev never reads/writes production state.
+#
+# Init:
+#   cd terraform/
+#   terraform init -backend-config=env/dev.backend.hcl
+##############################################################################
+
+bucket = "cfan-bux-tfstate"
+prefix = "what-time-is-it/dev/state"

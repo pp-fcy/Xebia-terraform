@@ -1,0 +1,27 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+.terraform.lock.hcl
+terraform.tfvars
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Editor / OS
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets – never commit these
+*.pem
+*.key
+credentials.json
+service-account*.json

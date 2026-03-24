@@ -1,0 +1,110 @@
+##############################################################################
+# destroy.yml – Destroy ALL Terraform-managed resources
+#
+# ⚠️  DESTRUCTIVE – irreversible. Deletes:
+#   Cloud Run services, Load Balancer, Cloud Armor, Artifact Registry,
+#   NEGs, static IP, enabled APIs, and all related resources.
+#   Terraform state in GCS is preserved (the bucket itself is not deleted).
+#
+# Safeguards:
+#   • Manual trigger only (workflow_dispatch) — never runs automatically.
+#   • Requires typing "destroy" in the confirmation input.
+#   • Requires the production GitHub Environment (add required reviewers there
+#     under Settings → Environments → production for an extra approval gate).
+#
+# Required secrets:
+#   WORKLOAD_IDENTITY_PROVIDER  – from scripts/bootstrap-wif.sh
+#   GCP_SERVICE_ACCOUNT         – github-actions-sa@<project>.iam.gserviceaccount.com
+##############################################################################
+name: "⚠️ Destroy"
+
+# Must not run alongside any other Terraform operation.
+concurrency:
+  group: terraform-production
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type 'destroy' to confirm you want to delete all resources"
+        required: true
+        type: string
+      reason:
+        description: "Reason for destroying (logged in job summary)"
+        required: true
+        type: string
+
+env:
+  TF_VERSION:          "~1.5"
+  TF_WORKING_DIR:      terraform
+  TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+
+jobs:
+  destroy:
+    name: "⚠️ terraform destroy"
+    runs-on: ubuntu-latest
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT:        ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+    steps:
+      - name: Confirm intent
+        run: |
+          if [[ "${{ inputs.confirm }}" != "destroy" ]]; then
+            echo "::error::Confirmation failed. You must type 'destroy' exactly. Got: '${{ inputs.confirm }}'"
+            exit 1
+          fi
+          echo "Confirmation accepted. Reason: ${{ inputs.reason }}"
+          echo "Triggered by: ${{ github.actor }}"
+
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend-config=env/prod.backend.hcl -input=false
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform destroy \
+            -var-file="env/prod.tfvars" \
+            -auto-approve \
+            -input=false
+
+      - name: Destroy summary
+        if: always()
+        run: |
+          echo "### ⚠️ Destroy completed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | \`${{ github.actor }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Reason | ${{ inputs.reason }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Result | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |" >> "$GITHUB_STEP_SUMMARY"

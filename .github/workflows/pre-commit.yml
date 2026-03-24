@@ -1,0 +1,75 @@
+##############################################################################
+# Runs the same checks as local pre-commit (Terraform fmt/validate/tflint, etc.)
+# Caches:
+#   pip              – keyed on requirements-dev.txt
+#   TFLint plugins   – keyed on terraform/.tflint.hcl
+#   Terraform providers – keyed on terraform/providers.tf (via TF_PLUGIN_CACHE_DIR)
+#   pre-commit envs  – handled automatically by pre-commit/action
+##############################################################################
+name: Pre-commit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+    env:
+      # Global provider cache dir picked up by every `terraform init` in hooks
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements-dev.txt') }}
+          restore-keys: pip-${{ runner.os }}-
+
+      - name: Cache TFLint plugins
+        uses: actions/cache@v4
+        with:
+          path: ~/.tflint.d/plugins
+          key: tflint-${{ runner.os }}-${{ hashFiles('terraform/.tflint.hcl') }}
+          restore-keys: tflint-${{ runner.os }}-
+
+      - name: Cache Terraform provider plugins
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.terraform-plugin-cache
+          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Create Terraform plugin cache dir
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: TFLint init (Google ruleset)
+        working-directory: terraform
+        run: tflint --init
+
+      - name: Install pre-commit
+        run: pip install -r requirements-dev.txt
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1

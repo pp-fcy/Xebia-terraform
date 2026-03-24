@@ -1,0 +1,47 @@
+# Cloud Build config — builds the what-time-is-it app image.
+#
+# Source: the what-time-is-it/ directory submitted directly as the build source.
+# Called via:
+#   gcloud builds submit what-time-is-it --config=cloudbuild.yaml \
+#     --substitutions=_IMAGE=...,_IMAGE_CACHE=...
+#
+# Submitting what-time-is-it/ (not the repo root) means Cloud Build's /workspace
+# is the app directory itself, so the Dockerfile is at /workspace/Dockerfile.
+
+substitutions:
+  _IMAGE:       "europe-west1-docker.pkg.dev/bux-project-490819/what-time-is-it/what-time-is-it:latest"
+  _IMAGE_CACHE: "europe-west1-docker.pkg.dev/bux-project-490819/what-time-is-it/what-time-is-it:buildcache"
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: pull-cache
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - "docker pull ${_IMAGE_CACHE} || true"
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: build
+    args:
+      - build
+      - "--cache-from=${_IMAGE_CACHE}"
+      - "--tag=${_IMAGE}"
+      - "--tag=${_IMAGE_CACHE}"
+      - "."
+    waitFor: [pull-cache]
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: push-image
+    args: [push, "${_IMAGE}"]
+    waitFor: [build]
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: push-cache
+    args: [push, "${_IMAGE_CACHE}"]
+    waitFor: [build]
+
+images:
+  - "${_IMAGE}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY

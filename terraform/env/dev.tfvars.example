@@ -1,0 +1,27 @@
+##############################################################################
+# Dev / sandbox environment example – terraform/env/dev.tfvars.example
+#
+# Copy and fill in for local development:
+#   cp env/dev.tfvars.example env/dev.tfvars   # (dev.tfvars is not committed)
+#   edit env/dev.tfvars with your values
+#
+# Usage:
+#   cd terraform/
+#   terraform init  -backend-config=env/dev.backend.hcl
+#   terraform plan  -var-file=env/dev.tfvars [-var="container_image=<img>"]
+#   terraform apply -var-file=env/dev.tfvars  -var="container_image=<img>"
+#
+# container_image defaults to a public hello-world if you omit -var.
+# Use a distinct app_name to avoid clashing with production resources.
+##############################################################################
+
+project_id       = "my-gcp-project-id"
+primary_region   = "europe-west1"
+secondary_region = "europe-west4"
+app_name         = "what-time-is-it-dev"
+
+domain = ""
+
+# Cheaper dev defaults
+min_instances = 0
+max_instances = 3

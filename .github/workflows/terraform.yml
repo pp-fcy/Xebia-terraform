@@ -1,0 +1,562 @@
+##############################################################################
+# terraform.yml – Infrastructure management + Blue/Green deployment
+#
+# Jobs:
+#
+#   plan    – After Pre-commit passes on a PR: run terraform plan, post as PR comment.
+#             Uses workflow_run trigger so pre-commit must succeed before plan starts.
+#   apply   – After Pre-commit passes on a push to main: terraform apply (infra only,
+#             preserves the currently running image).
+#   deploy  – workflow_call from release.yml: blue/green Terraform deploy of a new
+#             image. Phase 1 → secondary only + smoke test. Phase 2 → primary + full
+#             reconcile. Rollback path available via rollback_image input.
+#
+# Concurrency: ALL jobs (plan, apply, deploy, rollback) share the single
+#   "terraform-production" group, which is also used by build-image.yml and
+#   release.yml. This ensures Terraform never runs in parallel with a build
+#   or release, and vice versa.
+#
+# To DESTROY all resources see destroy.yml (manual trigger, requires confirmation).
+#
+# Config files (committed, no secrets):
+#   terraform/env/prod.tfvars       – regions, scaling, app_name
+#   terraform/env/prod.backend.hcl  – GCS state bucket / prefix
+#
+# Required secrets:
+#   WORKLOAD_IDENTITY_PROVIDER  – from scripts/bootstrap-wif.sh
+#   GCP_SERVICE_ACCOUNT         – github-actions-sa@<project>.iam.gserviceaccount.com
+##############################################################################
+name: Terraform
+
+# Concurrency strategy:
+#   - Direct triggers (push, workflow_dispatch): use the shared terraform-production
+#     group so they serialise with build-image and release.
+#   - workflow_call (called by release.yml): use a unique group based on run_id so
+#     this reusable workflow never tries to acquire the same lock that the calling
+#     workflow (release.yml) already holds — which would deadlock.
+concurrency:
+  group: ${{ github.event_name == 'workflow_call' && github.run_id || 'terraform-production' }}
+  cancel-in-progress: false
+
+on:
+  # plan  runs after Pre-commit passes on a PR.
+  # apply runs after Pre-commit passes on a push to main.
+  # Both use workflow_run so pre-commit is a hard gate before any Terraform
+  # operation touches production — neither fires in parallel with pre-commit.
+  workflow_run:
+    workflows: ["Pre-commit"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to run (plan or apply)"
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply]
+  workflow_call:
+    inputs:
+      image_ref:
+        description: "Full image reference for blue/green deploy"
+        required: false
+        type: string
+        default: ""
+      rollback_image:
+        description: "Image to roll back to (skips normal deploy)"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      WORKLOAD_IDENTITY_PROVIDER:
+        required: true
+      GCP_SERVICE_ACCOUNT:
+        required: true
+
+env:
+  TF_VERSION:         "~1.5"
+  TF_WORKING_DIR:     terraform
+  TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+
+# ─── Reusable steps as a local composite (avoids repetition) ─────────────────
+# GitHub doesn't support YAML anchors, so shared setup is a series of steps
+# repeated per job (plan / apply / deploy-primary / deploy-secondary / rollback).
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # PLAN – PR review: show what Terraform would change
+  # ────────────────────────────────────────────────────────────────────────────
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    # Run when Pre-commit succeeded on a PR, or on manual workflow_dispatch plan.
+    # workflow_run.event == 'pull_request' guards against post-push pre-commit runs.
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'plan')
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    env:
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT:        ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+    steps:
+      # Check out the PR head commit (workflow_run doesn't automatically do this).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Effective GCP identity
+        run: gcloud auth list --filter=status:ACTIVE --format='table(account,status)'
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend-config=env/prod.backend.hcl -input=false
+
+      - name: Resolve current image (avoid spurious diff)
+        id: current-image
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          IMG=$(terraform state show \
+            'module.what_time_is_it.google_cloud_run_v2_service.primary' 2>/dev/null \
+            | grep '^\s*image\s*=' | head -1 \
+            | sed 's/.*= *"\(.*\)"/\1/' || echo "")
+          echo "value=${IMG:-us-docker.pkg.dev/cloudrun/container/hello:latest}" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -var-file="env/prod.tfvars" \
+            -var="container_image=${{ steps.current-image.outputs.value }}" \
+            -out=tfplan -input=false -no-color \
+            2>&1 | tee plan_output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Post plan comment on PR
+        if: github.event_name == 'workflow_run'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs     = require('fs');
+            const raw    = fs.readFileSync('${{ env.TF_WORKING_DIR }}/plan_output.txt', 'utf8');
+            const out    = raw.length > 60000 ? raw.slice(0, 60000) + '\n...[truncated]' : raw;
+            const sha    = '${{ github.event.workflow_run.head_sha }}';
+            const branch = '${{ github.event.workflow_run.head_branch }}';
+            const body   = `## Terraform Plan\n<details><summary>Show plan</summary>\n\n\`\`\`terraform\n${out}\n\`\`\`\n</details>\n\n> commit \`${sha}\` · branch \`${branch}\``;
+            // workflow_run carries the associated PR(s) in the event payload.
+            const pr_number = context.payload.workflow_run.pull_requests?.[0]?.number;
+            if (!pr_number) { console.log('No associated PR found — skipping comment.'); return; }
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: pr_number
+            });
+            for (const c of comments) {
+              if (c.user.login === 'github-actions[bot]' && c.body.startsWith('## Terraform Plan'))
+                await github.rest.issues.deleteComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: c.id });
+            }
+            await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: pr_number, body });
+
+      - name: Fail if plan errored
+        if: steps.plan.outputs.exit_code != '0'
+        run: exit 1
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # CHECK-TF-CHANGES – Gate: did this push touch terraform/?
+  # Runs on the same conditions as apply. Outputs has_changes=true/false.
+  # workflow_dispatch always sets has_changes=true (manual override).
+  # ────────────────────────────────────────────────────────────────────────────
+  check-tf-changes:
+    name: Detect Terraform changes
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    outputs:
+      has_changes: ${{ steps.diff.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 2   # need HEAD~1 for the diff
+      - name: Check for terraform/ changes
+        id: diff
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual dispatch — treating as has_changes=true."
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^terraform/' || true)
+          if [[ -n "$CHANGED" ]]; then
+            echo "Changed files in terraform/:"
+            echo "$CHANGED"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No files changed under terraform/ — apply will be skipped."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # APPLY – Infra-only apply on merge to main (image preserved from state)
+  # Only runs when check-tf-changes confirms terraform/ files were touched.
+  # ────────────────────────────────────────────────────────────────────────────
+  apply:
+    name: Terraform Apply (infra)
+    runs-on: ubuntu-latest
+    needs: check-tf-changes
+    if: needs.check-tf-changes.outputs.has_changes == 'true'
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT:        ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+    steps:
+      # Check out the pushed commit (workflow_run doesn't automatically do this).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend-config=env/prod.backend.hcl -input=false
+
+      - name: Resolve current image (preserve running image)
+        id: current-image
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          IMG=$(terraform state show \
+            'module.what_time_is_it.google_cloud_run_v2_service.primary' 2>/dev/null \
+            | grep '^\s*image\s*=' | head -1 \
+            | sed 's/.*= *"\(.*\)"/\1/' || echo "")
+          echo "value=${IMG:-us-docker.pkg.dev/cloudrun/container/hello:latest}" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply \
+            -var-file="env/prod.tfvars" \
+            -var="container_image=${{ steps.current-image.outputs.value }}" \
+            -auto-approve -input=false
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # DEPLOY – Blue/Green phase 1: secondary region only + smoke test
+  # Secondary is the canary: it receives the new image first while primary
+  # continues serving the previous version. Only on success does primary update.
+  # Called by release.yml via workflow_call
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy-secondary:
+    name: "Deploy – secondary (blue/green phase 1)"
+    runs-on: ubuntu-latest
+    if: inputs.image_ref != '' && inputs.rollback_image == ''
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT:        ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      IMAGE_REF:                  ${{ inputs.image_ref }}
+
+    outputs:
+      previous_image: ${{ steps.capture.outputs.previous_image }}
+
+    steps:
+      - name: Validate IMAGE_REF
+        run: |
+          if [[ -z "${IMAGE_REF}" ]]; then
+            echo "::error::image_ref is required for deploy. Pass it from build-image.yml."
+            exit 1
+          fi
+          echo "Deploying: ${IMAGE_REF}"
+
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend-config=env/prod.backend.hcl -input=false
+
+      - name: Capture current image (auto-rollback reference)
+        id: capture
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          PREV=$(terraform state show \
+            'module.what_time_is_it.google_cloud_run_v2_service.secondary' 2>/dev/null \
+            | grep '^\s*image\s*=' | head -1 \
+            | sed 's/.*= *"\(.*\)"/\1/' || echo "")
+          echo "previous_image=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "Previous image: ${PREV:-<none>}"
+
+      - name: "Terraform apply – secondary only"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply \
+            -var-file="env/prod.tfvars" \
+            -var="container_image=${IMAGE_REF}" \
+            -target="module.what_time_is_it.google_cloud_run_v2_service.secondary" \
+            -auto-approve -input=false
+
+      - name: Read Terraform outputs
+        id: tf-out
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          CR_URL=$(terraform output -raw cloud_run_url_secondary)
+          PROJECT=$(grep 'project_id'        env/prod.tfvars | sed 's/.*= *"\(.*\)"/\1/')
+          REGION=$(grep  'secondary_region'  env/prod.tfvars | sed 's/.*= *"\(.*\)"/\1/')
+          APP=$(grep     'app_name'          env/prod.tfvars | sed 's/.*= *"\(.*\)"/\1/')
+          echo "cr_url=${CR_URL}"   >> "$GITHUB_OUTPUT"
+          echo "project=${PROJECT}" >> "$GITHUB_OUTPUT"
+          echo "region=${REGION}"   >> "$GITHUB_OUTPUT"
+          echo "app=${APP}"         >> "$GITHUB_OUTPUT"
+          echo "Secondary Cloud Run URL: ${CR_URL}"
+
+      - name: Open direct ingress on secondary for smoke test
+        run: |
+          gcloud run services update ${{ steps.tf-out.outputs.app }} \
+            --region=${{ steps.tf-out.outputs.region }} \
+            --project=${{ steps.tf-out.outputs.project }} \
+            --ingress=all
+
+      - name: Smoke test secondary via Cloud Run URL
+        run: |
+          CR_URL="${{ steps.tf-out.outputs.cr_url }}"
+
+          check_endpoint() {
+            local path="$1"
+            local expected_city="$2"
+            echo "Smoke testing ${CR_URL}${path} (3 attempts)..."
+            for i in $(seq 1 3); do
+              BODY=$(curl -s -o - -w "\n%{http_code}" --max-time 15 "${CR_URL}${path}")
+              HTTP_CODE=$(echo "$BODY" | tail -1)
+              CONTENT=$(echo "$BODY" | head -n -1)
+              if [[ "$HTTP_CODE" != "200" ]]; then
+                echo "❌ Attempt ${i}: HTTP ${HTTP_CODE}"
+                exit 1
+              fi
+              if ! echo "$CONTENT" | grep -q "in ${expected_city}"; then
+                echo "❌ Attempt ${i}: body missing 'in ${expected_city}'"
+                echo "Body: ${CONTENT}"
+                exit 1
+              fi
+              if ! echo "$CONTENT" | grep -qE "[0-9]{2}:[0-9]{2}:[0-9]{2}"; then
+                echo "❌ Attempt ${i}: body missing HH:mm:ss timestamp"
+                echo "Body: ${CONTENT}"
+                exit 1
+              fi
+              echo "✅ Attempt ${i}: HTTP 200, 'in ${expected_city}' and timestamp present"
+              sleep 2
+            done
+          }
+
+          check_endpoint "/amsterdam" "Amsterdam"
+          check_endpoint "/london" "London"
+
+      - name: Restore ingress restriction on secondary
+        if: always()
+        run: |
+          gcloud run services update ${{ steps.tf-out.outputs.app }} \
+            --region=${{ steps.tf-out.outputs.region }} \
+            --project=${{ steps.tf-out.outputs.project }} \
+            --ingress=internal-and-cloud-load-balancing
+
+      - name: Auto-rollback secondary on smoke test failure
+        if: failure() && steps.capture.outputs.previous_image != ''
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          echo "Rolling back secondary to: ${{ steps.capture.outputs.previous_image }}"
+          terraform apply \
+            -var-file="env/prod.tfvars" \
+            -var="container_image=${{ steps.capture.outputs.previous_image }}" \
+            -target="module.what_time_is_it.google_cloud_run_v2_service.secondary" \
+            -auto-approve -input=false
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # DEPLOY – Blue/Green phase 2: primary + full reconcile
+  # Only runs after secondary passes its smoke test.
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy-primary:
+    name: "Deploy – primary (blue/green phase 2)"
+    runs-on: ubuntu-latest
+    needs: deploy-secondary
+    if: inputs.image_ref != '' && inputs.rollback_image == ''
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT:        ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      IMAGE_REF:                  ${{ inputs.image_ref }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend-config=env/prod.backend.hcl -input=false
+
+      - name: "Terraform apply – primary + full reconcile"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply \
+            -var-file="env/prod.tfvars" \
+            -var="container_image=${IMAGE_REF}" \
+            -auto-approve -input=false
+
+      - name: Release summary
+        run: |
+          echo "### Release complete ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Region | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Secondary (europe-west4) | ✅ deployed + smoke tested |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Primary (europe-west1) | ✅ deployed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image**: \`${IMAGE_REF}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # ROLLBACK – Both regions immediately (no phased rollout)
+  # ────────────────────────────────────────────────────────────────────────────
+  rollback:
+    name: Rollback both regions
+    runs-on: ubuntu-latest
+    if: inputs.rollback_image != ''
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT:        ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend-config=env/prod.backend.hcl -input=false
+
+      - name: Terraform rollback – both regions
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          echo "Rolling back to: ${{ inputs.rollback_image }}"
+          terraform apply \
+            -var-file="env/prod.tfvars" \
+            -var="container_image=${{ inputs.rollback_image }}" \
+            -auto-approve -input=false
+
+      - name: Rollback summary
+        run: |
+          echo "### Rollback complete ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image**: \`${{ inputs.rollback_image }}\`" >> "$GITHUB_STEP_SUMMARY"
