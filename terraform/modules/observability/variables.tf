@@ -16,11 +16,6 @@ variable "app_name" {
   type        = string
 }
 
-variable "primary_region" {
-  description = "Primary region of the Cloud Run service the dashboard/uptime check should target."
-  type        = string
-}
-
 variable "uptime_check_host" {
   description = "Hostname or IP the uptime check probes (typically the Global Load Balancer IP or a custom domain). Empty disables the uptime check."
   type        = string

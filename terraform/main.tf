@@ -25,12 +25,12 @@ module "what_time_is_it" {
   max_instances   = var.max_instances
 }
 
+
 module "observability" {
   source = "./modules/observability"
 
-  project_id     = var.project_id
-  app_name       = var.app_name
-  primary_region = var.primary_region
+  project_id = var.project_id
+  app_name   = var.app_name
 
   # Probe the Load Balancer IP exported from the service module so the uptime
   # check exercises the same path real users take (LB → Cloud Armor → Cloud Run).
