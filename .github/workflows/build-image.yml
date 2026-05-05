@@ -167,6 +167,12 @@ jobs:
   # SCAN – Trivy CVE scan on the freshly built image (gate before deploy)
   # SOC2 CC7.1: vulnerability management — block HIGH/CRITICAL from reaching prod.
   # Runs after build so the image is already in Artifact Registry (no re-build).
+  #
+  # The scan is a hard gate: any HIGH/CRITICAL fixable CVE fails the run and
+  # blocks the deploy job. The full report is in the step log; we deliberately
+  # don't upload SARIF to the GitHub Security tab — that path requires GitHub
+  # Advanced Security on private repos (paid) and adds no security value over
+  # the gate itself for the simple-POC demo.
   # ────────────────────────────────────────────────────────────────────────────
   scan:
     name: Trivy image scan
@@ -174,8 +180,7 @@ jobs:
     needs: build
     permissions:
       contents: read
-      id-token: write       # WIF auth to pull image from Artifact Registry
-      security-events: write # upload SARIF to GitHub Security tab
+      id-token: write   # WIF auth to pull image from Artifact Registry
 
     env:
       WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
@@ -199,24 +204,6 @@ jobs:
           exit-code: "1"
           severity: HIGH,CRITICAL
           ignore-unfixed: true   # only block on CVEs that have a fix available
-
-      - name: Run Trivy – SARIF upload (full severity, for Security tab)
-        if: always()             # upload results even when the previous step fails
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ needs.build.outputs.image_ref }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: MEDIUM,HIGH,CRITICAL
-          ignore-unfixed: true
-
-      - name: Upload SARIF to GitHub Security tab
-        if: always()
-        continue-on-error: true   # non-blocking: requires GitHub Advanced Security on private repos
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-results.sarif
-          category: trivy-image
 
   # ────────────────────────────────────────────────────────────────────────────
   # DEPLOY – terraform apply with the new image, then smoke-test
