@@ -8,6 +8,7 @@ default_language_version:
   python: python3
 
 repos:
+  # ── General hygiene ────────────────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -17,10 +18,21 @@ repos:
       - id: check-yaml
         args: [--unsafe]
       - id: check-json
-      - id: detect-private-key
+      - id: detect-private-key           # SOC2 CC6.7: no secrets in source
       - id: mixed-line-ending
         args: [--fix=lf]
+      - id: check-added-large-files      # SOC2 CC6.1: prevent accidental data dumps
+        args: [--maxkb=1000]
+      - id: check-executables-have-shebangs
 
+  # ── Secret scanning ────────────────────────────────────────────────────────
+  # SOC2 CC6.7: deep credential / token detection before push
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # ── Terraform ─────────────────────────────────────────────────────────────
   - repo: https://github.com/antonbabenko/pre-commit-terraform
     rev: v1.96.3
     hooks:
@@ -36,3 +48,33 @@ repos:
         args:
           - --args=--call-module-type=all
         files: ^terraform/.*\.tf$
+
+  - repo: https://github.com/bridgecrewio/checkov
+    rev: 3.2.443
+    hooks:
+      - id: checkov
+        name: Checkov (Terraform)
+        args:
+          - --directory=terraform
+          - --framework=terraform
+          - --skip-check=CKV_TF_1  # false positive: registry modules use version= not git hash
+          - --compact
+          - --quiet
+        files: ^terraform/.*\.tf$
+
+      - id: checkov
+        name: Checkov (Dockerfile)
+        args:
+          - --framework=dockerfile
+          - --compact
+          - --quiet
+        files: ^.*/Dockerfile$
+
+      - id: checkov
+        name: Checkov (GitHub Actions)
+        args:
+          - --framework=github_actions
+          - --skip-check=CKV2_GHA_1  # false positive: workflow-level permissions: read-all is set; Checkov incorrectly re-flags job blocks
+          - --compact
+          - --quiet
+        files: ^\.github/workflows/.*\.yml$

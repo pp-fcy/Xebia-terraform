@@ -31,6 +31,9 @@
 ##############################################################################
 name: Terraform
 
+# Default to read-only; individual jobs grant write only where needed. (CKV2_GHA_1)
+permissions: read-all
+
 concurrency:
   group: terraform-production
   cancel-in-progress: false

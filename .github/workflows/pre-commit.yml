@@ -13,6 +13,9 @@ on:
   push:
     branches: [main]
 
+# Default to read-only; individual jobs grant write only where needed. (CKV2_GHA_1)
+permissions: read-all
+
 jobs:
   pre-commit:
     runs-on: ubuntu-latest

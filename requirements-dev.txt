@@ -1,2 +1,10 @@
 # Local development: pre-commit hooks
 pre-commit>=3.5,<5
+
+# Pre-commit hook dependencies (installed automatically by pre-commit,
+# listed here so developers know what's being pulled in)
+#
+# gitleaks    — secret scanning          (SOC2 CC6.7)
+# hadolint    — Dockerfile linting       (SOC2 CC7.1)
+# shellcheck  — shell script linting     (SOC2 CC6.8)
+# trivy       — Terraform security scan  (SOC2 CC6.1, CC7.1)

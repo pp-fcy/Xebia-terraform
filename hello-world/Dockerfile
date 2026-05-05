@@ -18,4 +18,9 @@ COPY --chown=app:app server.py ./
 ENV PORT=8080
 EXPOSE 8080
 
+# Used by container runtimes (local Docker, docker-compose).
+# Cloud Run uses Terraform startup/liveness probes instead.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/healthz')"
+
 CMD ["python", "-u", "server.py"]

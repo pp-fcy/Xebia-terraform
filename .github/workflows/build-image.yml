@@ -29,6 +29,9 @@
 ##############################################################################
 name: Build Image
 
+# Default to read-only; individual jobs grant write only where needed. (CKV2_GHA_1)
+permissions: read-all
+
 # Shares the terraform-production group with terraform.yml so build-image's
 # inline `terraform apply` never races plan/apply runs.
 concurrency:
