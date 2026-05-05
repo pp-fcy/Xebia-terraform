@@ -20,11 +20,6 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-# ─── Response payloads ──────────────────────────────────────────────────────
-# Edit these two strings to change what the service returns. They're the only
-# knobs a product-team developer needs to touch when adapting this sample.
-# Override at runtime via env vars (HELLO_MESSAGE / HEALTH_MESSAGE) without
-# rebuilding the image — handy for canary tests in the demo.
 HELLO_MESSAGE: str = os.environ.get("HELLO_MESSAGE", "Hello World !!!")
 HEALTH_MESSAGE: str = os.environ.get("HEALTH_MESSAGE", "ok")
 
