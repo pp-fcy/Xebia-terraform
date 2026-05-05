@@ -38,4 +38,3 @@ variable "max_instances" {
   type        = number
   default     = 10
 }
-

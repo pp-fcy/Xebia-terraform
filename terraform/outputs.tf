@@ -19,4 +19,3 @@ output "dashboard_url" {
   description = "Direct console URL to the service overview dashboard. Open this in the demo browser to show 'unified dashboard' from the management summary."
   value       = module.observability.dashboard_url
 }
-
