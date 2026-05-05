@@ -16,7 +16,7 @@
 #
 # Defaults match this repository; override with env vars before running:
 #   GCP_PROJECT_ID      default: bux-project-490819
-#   GITHUB_REPO         default: pp-fcy/BUX-task
+#   GITHUB_REPO         default: pp-fcy/Xebia-terraform
 #   TF_STATE_BUCKET     default: cfan-bux-tfstate
 #   TF_STATE_REGION     default: europe-west1
 #   WIF_POOL_ID         default: github-actions-pool
@@ -55,7 +55,7 @@ usage() {
 
 # ── Configuration ────────────────────────────────────────────────────────────
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-bux-project-490819}"
-GITHUB_REPO="${GITHUB_REPO:-pp-fcy/BUX-task}"
+GITHUB_REPO="${GITHUB_REPO:-pp-fcy/Xebia-terraform}"
 
 TF_STATE_BUCKET="${TF_STATE_BUCKET:-cfan-bux-tfstate}"
 TF_STATE_REGION="${TF_STATE_REGION:-europe-west1}"

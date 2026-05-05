@@ -20,8 +20,7 @@ module "what_time_is_it" {
 }
 
 module "observability" {
-  source = "./modules/observability"
-
+  source     = "./modules/observability"
   project_id = var.project_id
   app_name   = var.app_name
 }
