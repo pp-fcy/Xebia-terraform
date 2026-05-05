@@ -1,20 +1,24 @@
 ##############################################################################
 # build-image.yml – Build and deploy the application Docker image
 #
-# Triggered by three paths:
+# Triggered by two paths:
 #   1. push to main touching hello-world/** — fires via workflow_run AFTER
 #      Pre-commit passes (same gate pattern as terraform.yml apply job).
 #   2. repository_dispatch (type: hello-world-updated) — external app repo
 #      pushes to its own main.
-#   3. workflow_dispatch — manual trigger.
+#
+# No manual workflow_dispatch — every deploy goes through Pre-commit first.
+# To redeploy a previous image, push a revert commit (or roll back the Cloud
+# Run revision in the GCP console as an emergency lever).
 #
 # Jobs:
 #   1. check-app-changes – gate: skips the build when a push to main did not
 #      touch the hello-world/ directory.
-#   2. build – Run Cloud Build (cloudbuild.yaml): builds Dockerfile from the
-#      hello-world/ directory, pushes to Artifact Registry.
-#   3. deploy – Calls terraform.yml's deploy job (workflow_call) with the new
-#      image. Single-region apply + smoke test, no canary or blue/green.
+#   2. build  – Cloud Build builds the Dockerfile from hello-world/, pushes
+#      the image to Artifact Registry.
+#   3. deploy – terraform apply with the new image, then smoke-test `/` and
+#      `/healthz`. Inline (not a reusable workflow_call) — keeping it inline
+#      avoids the dual-trigger inputs-context pitfall in GitHub Actions.
 #
 # Project, region, and app_name are read from committed terraform/env/prod.tfvars
 # so there are no extra GitHub Variables to maintain.
@@ -25,44 +29,38 @@
 ##############################################################################
 name: Build Image
 
+# Shares the terraform-production group with terraform.yml so build-image's
+# inline `terraform apply` never races plan/apply runs.
 concurrency:
   group: terraform-production
   cancel-in-progress: false
 
 on:
-  # Fires after Pre-commit completes on a push to main — ensures pre-commit is
-  # a hard gate before the image build starts (mirrors terraform.yml apply pattern).
   workflow_run:
     workflows: ["Pre-commit"]
     types: [completed]
   repository_dispatch:
-    types: [hello-world-updated]   # external app repo pushes to main
-  workflow_dispatch:
-    inputs:
-      trigger_deploy:
-        description: "Deploy the freshly built image after the build succeeds"
-        required: false
-        default: "true"
-        type: choice
-        options: ["true", "false"]
+    types: [hello-world-updated]
 
 env:
-  # For workflow_run use the pushed commit's SHA; for repository_dispatch use
-  # the app repo SHA from the payload; fall back to github.sha for everything else.
-  IMAGE_TAG: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.event.workflow_run.head_sha || github.sha }}
+  # For workflow_run use the pushed commit SHA; for repository_dispatch use
+  # the SHA from the dispatch payload.
+  IMAGE_TAG: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.event.workflow_run.head_sha }}
+  TF_VERSION:          "~1.5"
+  TF_WORKING_DIR:      terraform
+  TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
   # GATE – Did this push touch hello-world/?
-  # Skips the build when the push only changed unrelated files.
-  # Dispatch events (repository_dispatch, workflow_dispatch) always pass through.
+  # repository_dispatch always passes through (the external app repo signalled
+  # an actual change). workflow_run runs only if Pre-commit succeeded on a push.
   # ────────────────────────────────────────────────────────────────────────────
   check-app-changes:
     name: Detect app changes
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'repository_dispatch' ||
-      github.event_name == 'workflow_dispatch'   ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
@@ -71,13 +69,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          fetch-depth: 2   # need HEAD~1 for the diff
+          ref: ${{ github.event.workflow_run.head_sha || github.event.client_payload.sha }}
+          fetch-depth: 2
       - name: Check for hello-world/ changes
         id: diff
         run: |
-          if [[ "${{ github.event_name }}" != "workflow_run" ]]; then
-            echo "Dispatch event — treating as has_changes=true."
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "Cross-repo dispatch — treating as has_changes=true."
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -92,7 +90,7 @@ jobs:
           fi
 
   # ────────────────────────────────────────────────────────────────────────────
-  # BUILD
+  # BUILD – submit Dockerfile build to Cloud Build, push to Artifact Registry
   # ────────────────────────────────────────────────────────────────────────────
   build:
     name: Build image via Cloud Build
@@ -162,18 +160,103 @@ jobs:
           echo "### Image built ✅" >> "$GITHUB_STEP_SUMMARY"
           echo "**Image**: \`${{ steps.image-ref.outputs.value }}\`" >> "$GITHUB_STEP_SUMMARY"
 
-  # Single-region deploy via terraform.yml's reusable `deploy` job.
+  # ────────────────────────────────────────────────────────────────────────────
+  # DEPLOY – terraform apply with the new image, then smoke-test
   # No canary, no blue/green, no auto-rollback — this is the simple POC path.
+  # Rollback = push a revert commit (re-runs the same pipeline) or roll back
+  # the Cloud Run revision in the GCP console as an emergency lever.
+  # ────────────────────────────────────────────────────────────────────────────
   deploy:
     name: Deploy new image
+    runs-on: ubuntu-latest
     needs: build
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      inputs.trigger_deploy == 'true'
+    environment: production
     permissions:
       contents: read
       id-token: write
-    uses: ./.github/workflows/terraform.yml
-    with:
-      image_ref: ${{ needs.build.outputs.image_ref }}
-    secrets: inherit
+
+    env:
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT:        ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      IMAGE_REF:                  ${{ needs.build.outputs.image_ref }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend-config=env/prod.backend.hcl -input=false
+
+      - name: Terraform Apply (deploy new image)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply \
+            -var-file="env/prod.tfvars" \
+            -var="container_image=${IMAGE_REF}" \
+            -auto-approve -input=false
+
+      - name: Read Cloud Run URL
+        id: tf-out
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          CR_URL=$(terraform output -raw cloud_run_url)
+          echo "cr_url=${CR_URL}" >> "$GITHUB_OUTPUT"
+          echo "Cloud Run URL: ${CR_URL}"
+
+      - name: Smoke test the new revision
+        run: |
+          CR_URL="${{ steps.tf-out.outputs.cr_url }}"
+
+          # The walking-stick service exposes:
+          #   GET /        → 200 "Hello World"
+          #   GET /healthz → 200 "ok"
+          check_endpoint() {
+            local path="$1"
+            local expected="$2"
+            echo "Smoke testing ${CR_URL}${path} (3 attempts)..."
+            for i in $(seq 1 3); do
+              BODY=$(curl -s -o - -w "\n%{http_code}" --max-time 15 "${CR_URL}${path}")
+              HTTP_CODE=$(echo "$BODY" | tail -1)
+              CONTENT=$(echo "$BODY" | head -n -1)
+              if [[ "$HTTP_CODE" != "200" ]]; then
+                echo "❌ Attempt ${i}: HTTP ${HTTP_CODE}"
+                exit 1
+              fi
+              if ! echo "$CONTENT" | grep -q "${expected}"; then
+                echo "❌ Attempt ${i}: body missing '${expected}'"
+                echo "Body: ${CONTENT}"
+                exit 1
+              fi
+              echo "✅ Attempt ${i}: HTTP 200 with '${expected}'"
+              sleep 2
+            done
+          }
+
+          check_endpoint "/" "Hello World"
+          check_endpoint "/healthz" "ok"
+
+      - name: Deploy summary
+        if: always()
+        run: |
+          echo "### Deploy ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image**: \`${IMAGE_REF}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Cloud Run URL**: ${{ steps.tf-out.outputs.cr_url }}" >> "$GITHUB_STEP_SUMMARY"

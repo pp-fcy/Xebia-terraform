@@ -56,9 +56,9 @@ Everything in the [IDP architecture map](IDP_ARCHITECTURE.md#the-five-layers):
   - `modules/observability/` — drop in for any service, no edits
 - **L4 Delivery & Promotion**
   - `pre-commit` workflow (terraform fmt, validate, file hygiene)
-  - `terraform.yml` (plan posted as PR comment, apply on merge, reusable deploy job)
-  - `build-image.yml` (Cloud Build with layer cache → calls the deploy job with the new image)
-  - Deploy = `terraform apply` + smoke test on `/` and `/healthz`. Manual `workflow_dispatch` of the deploy job with a previous image is the rollback path.
+  - `terraform.yml` (plan posted as PR comment on PRs, infra apply on merge to main)
+  - `build-image.yml` (Cloud Build with layer cache → inline `terraform apply` with the new image → smoke test)
+  - Rollback = push a revert commit (re-runs the same pipeline) or swap the Cloud Run revision in the GCP console as an emergency lever — no auto-rollback for the simple POC
 - **L5 Developer Experience**
   - This documentation
   - Service-level README in `hello-world/`

@@ -86,11 +86,12 @@ The assignment requires four components. Here is exactly where each one lives:
               └────────────────────────────────────────────────┘
 ```
 
-> **Single-region simple POC.** No canary, no blue/green, no auto-rollback.
-> The deploy is one `terraform apply` with the freshly built image followed
-> by a smoke test; rollback is a manual `workflow_dispatch` of the deploy job
-> with a previous image reference. Adding HA / progressive delivery is a
-> focused module + workflow change for the launch-readiness phase.
+> **Single-region simple POC.** No canary, no blue/green, no auto-rollback,
+> no manual `workflow_dispatch`. The deploy is one `terraform apply` with the
+> freshly built image followed by a smoke test; rollback is a revert commit
+> (re-runs the same pipeline) or a Cloud Run console revision swap as an
+> emergency lever. Adding HA / progressive delivery is a focused module +
+> workflow change for the launch-readiness phase.
 
 ## Trade-offs we made (and why)
 

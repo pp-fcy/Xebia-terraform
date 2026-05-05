@@ -17,7 +17,8 @@
 - [ ] One pre-prepared branch (`demo/change-text`) with a tiny code change ready
   to push live.
 - [ ] One previous successful image tag noted down — if the live deploy fails,
-  re-run the **deploy** job via `workflow_dispatch` with that tag to roll back.
+  swap the Cloud Run revision in the GCP console (or push a revert commit and
+  let the same pipeline redeploy the prior code) as the rollback path.
 - [ ] [Management Summary](../README.md#management-summary) printed copies on
   the table.
 
@@ -158,15 +159,21 @@ Then open **Logs Explorer** — show the saved query for the log-based metric.
 
 ### 3e — Rollback path (2 min — drop if behind)
 
-Open `terraform.yml` in the browser, scroll to the **deploy** job. Walk through
-how rollback works in the simple POC:
+Open `build-image.yml` in the browser, scroll to the **deploy** job. Walk
+through how rollback works in the simple POC:
 
 - The deploy job ran `terraform apply` with the new image and then smoke-tested
   it. If the smoke test fails, the run fails — but the new revision is live.
-- To roll back: re-trigger the deploy job via **Actions → Terraform → Run
-  workflow** with `action=apply` and `image_ref=<previous successful tag>`.
-  One `terraform apply` later, the previous revision is serving again.
-- Mean time to restore: < 5 minutes — bounded by Cloud Run's revision swap.
+- Two rollback levers, both **without** any manual GitHub Actions trigger
+  (there is no `workflow_dispatch` in CI by design):
+  1. **Revert commit** — `git revert HEAD && git push`. Pre-commit runs,
+     build-image rebuilds the previous code, deploy + smoke test redeploys it.
+     Same path every code change takes — no special-case operator workflow.
+  2. **Cloud Run console revision swap** — emergency lever when speed matters
+     more than auditability. Pick a previous green revision and click
+     "Rollback to this revision". Mean time to restore: ~30 seconds.
+- The "no workflow_dispatch in CI" rule is a deliberate platform choice: it
+  prevents the "I'll just dispatch a fix bypassing pre-commit" anti-pattern.
 
 > "Auto-rollback and canary are deliberately out of scope for the walking
 > stick. Once the platform is in production they're a focused workflow change

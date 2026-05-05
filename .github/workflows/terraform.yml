@@ -1,22 +1,25 @@
 ##############################################################################
-# terraform.yml – Infrastructure management + simple deploy
+# terraform.yml – Infrastructure plan / apply
 #
 # Jobs:
 #
-#   plan    – After Pre-commit passes on a PR: run terraform plan, post as PR comment.
-#             Uses workflow_run trigger so pre-commit must succeed before plan starts.
-#   apply   – After Pre-commit passes on a push to main that touched terraform/:
-#             terraform apply (infra only, preserves the currently running image).
-#   deploy  – workflow_call from build-image.yml: terraform apply with a freshly
-#             built image. Single Cloud Run service in one region — no canary,
-#             no blue/green. Smoke test runs after apply; if it fails, the deploy
-#             job fails (no automatic rollback in the simple POC — use the
-#             manual workflow_dispatch with a previous image to roll back).
+#   plan   – After Pre-commit passes on a PR: run terraform plan, post the diff
+#            as a PR comment.
+#   apply  – After Pre-commit passes on a push to main that touched terraform/:
+#            run terraform apply (infra only — preserves the currently running
+#            container image, which is updated separately by build-image.yml).
 #
-# Concurrency: ALL jobs share the single "terraform-production" group, so
-# Terraform never runs in parallel with itself or with build-image.
+# Image deploys are handled by build-image.yml, which builds a new image and
+# then runs its own terraform apply with the new image_ref. Keeping that path
+# inline (no workflow_call indirection) avoids the dual-trigger inputs-context
+# pitfall that produces "Startup failure" in GitHub Actions.
 #
-# To DESTROY all resources see destroy.yml (manual trigger, requires confirmation).
+# Trigger: workflow_run only — there is no manual workflow_dispatch. Every
+# Terraform action goes through Pre-commit first, no exceptions.
+#
+# Concurrency: shares "terraform-production" with build-image.yml so plan,
+# apply, and the build-image deploy never run in parallel against the same
+# Terraform state.
 #
 # Config files (committed, no secrets):
 #   terraform/env/prod.tfvars       – region, scaling, app_name
@@ -28,44 +31,15 @@
 ##############################################################################
 name: Terraform
 
-# Concurrency strategy:
-#   - Direct triggers (push, workflow_dispatch): use the shared terraform-production
-#     group so they serialise with build-image.
-#   - workflow_call (called by build-image.yml): use a unique group per run_id so
-#     this reusable workflow never tries to acquire the same lock that the calling
-#     workflow already holds — which would deadlock.
 concurrency:
-  group: ${{ github.event_name == 'workflow_call' && github.run_id || 'terraform-production' }}
+  group: terraform-production
   cancel-in-progress: false
 
 on:
+  # Plan on PR + apply on push to main, both gated on Pre-commit success.
   workflow_run:
     workflows: ["Pre-commit"]
     types: [completed]
-  workflow_dispatch:
-    inputs:
-      action:
-        description: "Action to run (plan or apply)"
-        required: true
-        default: plan
-        type: choice
-        options: [plan, apply]
-      image_ref:
-        description: "Optional image to deploy. Leave empty to keep the currently running image."
-        required: false
-        type: string
-        default: ""
-  workflow_call:
-    inputs:
-      image_ref:
-        description: "Full image reference for the deploy"
-        required: true
-        type: string
-    secrets:
-      WORKLOAD_IDENTITY_PROVIDER:
-        required: true
-      GCP_SERVICE_ACCOUNT:
-        required: true
 
 env:
   TF_VERSION:          "~1.5"
@@ -80,10 +54,8 @@ jobs:
     name: Terraform Plan
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'pull_request') ||
-      (github.event_name == 'workflow_dispatch' && inputs.action == 'plan')
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
     permissions:
       contents: read
       id-token: write
@@ -96,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -149,7 +121,6 @@ jobs:
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Post plan comment on PR
-        if: github.event_name == 'workflow_run'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -183,25 +154,18 @@ jobs:
     name: Detect Terraform changes
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push') ||
-      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
     outputs:
       has_changes: ${{ steps.diff.outputs.has_changes }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 2
       - name: Check for terraform/ changes
         id: diff
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "Manual dispatch — treating as has_changes=true."
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^terraform/' || true)
           if [[ -n "$CHANGED" ]]; then
             echo "Changed files in terraform/:"
@@ -213,15 +177,14 @@ jobs:
           fi
 
   # ────────────────────────────────────────────────────────────────────────────
-  # APPLY – Infra-only apply on merge to main (image preserved from state)
-  # Runs only when check-tf-changes confirms terraform/ files were touched, OR
-  # when manually dispatched with action=apply (and no image_ref).
+  # APPLY – Infra-only apply on merge to main (image preserved from state).
+  # New image deploys are handled inline by build-image.yml.
   # ────────────────────────────────────────────────────────────────────────────
   apply:
     name: Terraform Apply (infra)
     runs-on: ubuntu-latest
     needs: check-tf-changes
-    if: needs.check-tf-changes.outputs.has_changes == 'true' && (github.event_name != 'workflow_dispatch' || inputs.image_ref == '')
+    if: needs.check-tf-changes.outputs.has_changes == 'true'
     environment: production
     permissions:
       contents: read
@@ -234,7 +197,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -276,116 +239,3 @@ jobs:
             -var-file="env/prod.tfvars" \
             -var="container_image=${{ steps.current-image.outputs.value }}" \
             -auto-approve -input=false
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # DEPLOY – Single-region apply with a freshly built image, then smoke test.
-  # Called by build-image.yml via workflow_call after each successful image build,
-  # or manually via workflow_dispatch with action=apply + image_ref set.
-  # No canary, no blue/green, no auto-rollback — this is the simple POC path.
-  # ────────────────────────────────────────────────────────────────────────────
-  deploy:
-    name: Deploy new image
-    runs-on: ubuntu-latest
-    # inputs.image_ref is only populated via workflow_call (from build-image.yml) or
-    # a manual workflow_dispatch with image_ref set. github.event_name in a called
-    # workflow reflects the CALLER's event (e.g. workflow_run), not 'workflow_call',
-    # so we check the input directly rather than the event name.
-    if: inputs.image_ref != ''
-    environment: production
-    permissions:
-      contents: read
-      id-token: write
-
-    env:
-      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
-      GCP_SERVICE_ACCOUNT:        ${{ secrets.GCP_SERVICE_ACCOUNT }}
-      IMAGE_REF:                  ${{ inputs.image_ref }}
-
-    steps:
-      - name: Validate IMAGE_REF
-        run: |
-          if [[ -z "${IMAGE_REF}" ]]; then
-            echo "::error::image_ref is required for deploy."
-            exit 1
-          fi
-          echo "Deploying: ${IMAGE_REF}"
-
-      - uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
-
-      - uses: actions/cache@v4
-        with:
-          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
-          key: tf-providers-${{ runner.os }}-${{ hashFiles('terraform/providers.tf') }}
-          restore-keys: tf-providers-${{ runner.os }}-
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
-
-      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
-
-      - name: Terraform Init
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init -backend-config=env/prod.backend.hcl -input=false
-
-      - name: Terraform Apply (deploy new image)
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: |
-          terraform apply \
-            -var-file="env/prod.tfvars" \
-            -var="container_image=${IMAGE_REF}" \
-            -auto-approve -input=false
-
-      - name: Read Cloud Run URL
-        id: tf-out
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: |
-          CR_URL=$(terraform output -raw cloud_run_url)
-          echo "cr_url=${CR_URL}" >> "$GITHUB_OUTPUT"
-          echo "Cloud Run URL: ${CR_URL}"
-
-      - name: Smoke test the new revision
-        run: |
-          CR_URL="${{ steps.tf-out.outputs.cr_url }}"
-
-          # The walking-stick service exposes:
-          #   GET /        → 200 "Hello World"
-          #   GET /healthz → 200 "ok"
-          check_endpoint() {
-            local path="$1"
-            local expected="$2"
-            echo "Smoke testing ${CR_URL}${path} (3 attempts)..."
-            for i in $(seq 1 3); do
-              BODY=$(curl -s -o - -w "\n%{http_code}" --max-time 15 "${CR_URL}${path}")
-              HTTP_CODE=$(echo "$BODY" | tail -1)
-              CONTENT=$(echo "$BODY" | head -n -1)
-              if [[ "$HTTP_CODE" != "200" ]]; then
-                echo "❌ Attempt ${i}: HTTP ${HTTP_CODE}"
-                exit 1
-              fi
-              if ! echo "$CONTENT" | grep -q "${expected}"; then
-                echo "❌ Attempt ${i}: body missing '${expected}'"
-                echo "Body: ${CONTENT}"
-                exit 1
-              fi
-              echo "✅ Attempt ${i}: HTTP 200 with '${expected}'"
-              sleep 2
-            done
-          }
-
-          check_endpoint "/" "Hello World"
-          check_endpoint "/healthz" "ok"
-
-      - name: Deploy summary
-        if: always()
-        run: |
-          echo "### Deploy ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Image**: \`${IMAGE_REF}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Cloud Run URL**: ${{ steps.tf-out.outputs.cr_url }}" >> "$GITHUB_STEP_SUMMARY"

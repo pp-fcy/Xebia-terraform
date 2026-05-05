@@ -305,9 +305,9 @@ in the **app repo's** GitHub settings if you split repos, not here.
 
 ## CI/CD Workflows — the IDP delivery layer
 
-Three workflows in `.github/workflows/` (plus a manual `destroy.yml`) are the
-platform team's contribution to every product team's repo. A product team using
-the template inherits them unchanged.
+Three workflows in `.github/workflows/` are the platform team's contribution
+to every product team's repo. A product team using the template inherits them
+unchanged.
 
 ### On pull request
 
@@ -323,23 +323,29 @@ PR opened / updated
 push to main
   ├─ pre-commit
   ├─ terraform apply (only if terraform/ files changed, image preserved from state)
-  └─ build-image    (only if hello-world/ files changed; Cloud Build, layer-cached)
-       └─ deploy   (calls terraform.yml's deploy job)
-            ├─ terraform apply with the new image
-            └─ smoke test:  GET / → "Hello World",  GET /healthz → "ok"
-            (smoke test failure fails the run; manual re-deploy of a previous
-             image via workflow_dispatch is the rollback path)
+  └─ build-image  (only if hello-world/ files changed; Cloud Build, layer-cached)
+       ├─ build  (Cloud Build → push to Artifact Registry)
+       └─ deploy (terraform apply with the new image, then smoke-test)
+            ├─ smoke test:  GET / → "Hello World",  GET /healthz → "ok"
+            └─ smoke-test failure fails the run; rollback = push a revert
+               commit (re-runs the same pipeline) or roll back the Cloud Run
+               revision in the GCP console as an emergency lever
 ```
+
+> **No manual `workflow_dispatch`.** Every code path goes through Pre-commit
+> first; there are no escape hatches in CI. This keeps the platform's
+> "one supported way to ship a service" promise honest.
 
 The `pre-commit` workflow is the **hard gate** — `terraform.yml` and
 `build-image.yml` both fire via `workflow_run` only after it succeeds.
 
 ### Concurrency
 
-All Terraform jobs share the `terraform-production` concurrency group so
-no two plan/apply/deploy runs touch state in parallel. The single exception
-is reusable `workflow_call` runs (deploy invoked from `build-image.yml`) which
-use a unique group per run-id to avoid deadlocking with the calling workflow.
+`terraform.yml` and `build-image.yml` share the `terraform-production`
+concurrency group so no two `terraform apply` runs touch state in parallel.
+Build-image's deploy job is **inline** (not a reusable `workflow_call`) —
+keeping it inline avoids the dual-trigger `inputs` context pitfall in GitHub
+Actions that previously caused "Startup failure" on `workflow_run` triggers.
 
 ---
 
@@ -393,7 +399,7 @@ The assignment says **don't over-engineer**. These are the intentional cuts:
 | Cut | Why | When |
 |-----|-----|------|
 | Multi-region HA (second Cloud Run + extra LB backend) | Walking stick is a simple POC — adding a second region is a focused module change, not a platform redesign | Launch-readiness phase, ahead of go-live |
-| Canary / blue-green / progressive delivery | Out of scope for the POC. Smoke test on the new revision + manual `workflow_dispatch` rollback to a prior image is enough to demo safe delivery | When traffic + revenue justify the operational overhead |
+| Canary / blue-green / progressive delivery | Out of scope for the POC. Smoke test on the new revision + revert-commit rollback (or console-side Cloud Run revision rollback) is enough to demo safe delivery | When traffic + revenue justify the operational overhead |
 | Multi-tenant isolation (GKE + Istio namespaces) | Cloud Run is single-tenant by design | Phase 03, weeks 11–16 |
 | Distributed tracing (OTel + Cloud Trace) | App-side instrumentation is a code change | Sprint after Foundation |
 | Policy-as-code (Checkov / OPA) | Fits as a pre-commit hook | Phase 02, week 7 |

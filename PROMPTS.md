@@ -241,6 +241,58 @@ deploy job with a previous image tag.
 
 ---
 
+## 13. Fix GitHub Actions "Startup failure" — drop the workflow_call indirection
+
+After the canary removal, push to main triggered Pre-commit → terraform.yml via
+workflow_run, which reported **Startup failure** (run never started). Root
+cause: terraform.yml had three triggers in the same file — `workflow_run`,
+`workflow_dispatch`, and `workflow_call` — and a deploy job whose `if:`
+referenced `inputs.image_ref`. When the file is loaded for a `workflow_run`
+event, the `inputs` context is null; references to `inputs.X` in job-level
+`if:` conditions tip GitHub Actions into a startup failure on workflows that
+mix triggers like this.
+
+**Prompt (workflow restructure):**
+> Drop the workflow_call trigger from terraform.yml entirely. Move the deploy
+> logic (terraform apply with the new image_ref + smoke test) inline into
+> build-image.yml as its own job. Keep both workflows in the same
+> `terraform-production` concurrency group so they serialise. Update README,
+> SERVICE_TEMPLATE, and DEMO_SCRIPT to drop references to "the deploy job in
+> terraform.yml" / "calls terraform.yml as a reusable workflow".
+
+The result is two simple, single-trigger-shape workflows: terraform.yml does
+plan + infra apply; build-image.yml does build + image deploy. No reusable
+workflow indirection, no dual-trigger `inputs` quirks.
+
+---
+
+## 14. Remove all manual triggers — single supported path
+
+The platform's "one supported way to ship a service" rule was being undercut
+by `workflow_dispatch` escape hatches in CI. Every dispatch button is a
+temptation to bypass the pre-commit gate during an incident; that's exactly
+the anti-pattern the operating model rules out.
+
+**Prompt (drop manual triggers):**
+> Remove `workflow_dispatch` from every workflow. Specifically:
+> - terraform.yml: drop the dispatch trigger and the `inputs.action` references
+>   in the plan / check-tf-changes if conditions. Workflow_run is the only
+>   trigger; plan runs on PR, apply runs on push to main.
+> - build-image.yml: drop the dispatch trigger and the `inputs.trigger_deploy`
+>   gate on the deploy job. workflow_run + repository_dispatch only.
+> - destroy.yml: delete the file (purely manual; orphaned without
+>   workflow_dispatch). `terraform destroy` is still available locally.
+> Update README, IDP_ARCHITECTURE, SERVICE_TEMPLATE, and DEMO_SCRIPT to
+> describe rollback as either a revert commit (which re-runs the pipeline)
+> or a Cloud Run console revision swap as the emergency lever.
+
+The trade-off is honest: you lose a one-click rollback button in favour of a
+single, audited code path. Rollback is slower (revert commit + pipeline run)
+but no faster than the original deploy was, which is fine for a SaaS on the
+launch ramp. The Cloud Run console revision swap stays as a last-resort lever.
+
+---
+
 ## Tools used
 
 - **AI:** Claude Sonnet (Anthropic) via Claude desktop app (Cowork mode)
