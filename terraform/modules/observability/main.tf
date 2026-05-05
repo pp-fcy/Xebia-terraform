@@ -53,9 +53,6 @@ resource "google_logging_metric" "app_errors" {
 }
 
 # ─── Dashboard ──────────────────────────────────────────────────────────────
-# Single pane of glass: every IDP service gets the same shape so on-call
-# rotates without retraining. Layout: top row = traffic (req/s + active
-# instances), middle row = latency percentiles, bottom row = errors.
 resource "google_monitoring_dashboard" "service" {
   project = var.project_id
   dashboard_json = jsonencode({
