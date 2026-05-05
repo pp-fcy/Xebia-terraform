@@ -1,25 +1,26 @@
 ##############################################################################
-# build-image.yml – Build and push the application Docker image
+# build-image.yml – Build and deploy the application Docker image
 #
 # Triggered by three paths:
-#   1. push to main touching what-time-is-it/** — fires via workflow_run AFTER
+#   1. push to main touching hello-world/** — fires via workflow_run AFTER
 #      Pre-commit passes (same gate pattern as terraform.yml apply job).
-#   2. repository_dispatch (type: what-time-is-it-updated) — external app repo
+#   2. repository_dispatch (type: hello-world-updated) — external app repo
 #      pushes to its own main.
 #   3. workflow_dispatch — manual trigger.
 #
-# Steps:
-#   1. check-app-changes – gate job: skips the build when a push to main did
-#      not touch the what-time-is-it/ directory.
+# Jobs:
+#   1. check-app-changes – gate: skips the build when a push to main did not
+#      touch the hello-world/ directory.
 #   2. build – Run Cloud Build (cloudbuild.yaml): builds Dockerfile from the
-#      what-time-is-it/ directory, pushes to Artifact Registry.
-#   3. trigger-release – Dispatch release.yml for blue/green deploy.
+#      hello-world/ directory, pushes to Artifact Registry.
+#   3. deploy – Calls terraform.yml's deploy job (workflow_call) with the new
+#      image. Single-region apply + smoke test, no canary or blue/green.
 #
 # Project, region, and app_name are read from committed terraform/env/prod.tfvars
 # so there are no extra GitHub Variables to maintain.
 #
 # Required secrets:
-#   WORKLOAD_IDENTITY_PROVIDER  – from scripts/bootstrap-wif.sh
+#   WORKLOAD_IDENTITY_PROVIDER  – from scripts/init-project.sh
 #   GCP_SERVICE_ACCOUNT         – github-actions-sa@<project>.iam.gserviceaccount.com
 ##############################################################################
 name: Build Image
@@ -35,11 +36,11 @@ on:
     workflows: ["Pre-commit"]
     types: [completed]
   repository_dispatch:
-    types: [what-time-is-it-updated]   # external app repo pushes to main
+    types: [hello-world-updated]   # external app repo pushes to main
   workflow_dispatch:
     inputs:
-      trigger_release:
-        description: "Trigger blue/green deploy after a successful build"
+      trigger_deploy:
+        description: "Deploy the freshly built image after the build succeeds"
         required: false
         default: "true"
         type: choice
@@ -52,7 +53,7 @@ env:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # GATE – Did this push touch what-time-is-it/?
+  # GATE – Did this push touch hello-world/?
   # Skips the build when the push only changed unrelated files.
   # Dispatch events (repository_dispatch, workflow_dispatch) always pass through.
   # ────────────────────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 2   # need HEAD~1 for the diff
-      - name: Check for what-time-is-it/ changes
+      - name: Check for hello-world/ changes
         id: diff
         run: |
           if [[ "${{ github.event_name }}" != "workflow_run" ]]; then
@@ -80,13 +81,13 @@ jobs:
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^what-time-is-it/' || true)
+          CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^hello-world/' || true)
           if [[ -n "$CHANGED" ]]; then
-            echo "Changed files in what-time-is-it/:"
+            echo "Changed files in hello-world/:"
             echo "$CHANGED"
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No files changed under what-time-is-it/ — build will be skipped."
+            echo "No files changed under hello-world/ — build will be skipped."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -148,9 +149,9 @@ jobs:
           IMAGE="${{ steps.image-ref.outputs.value }}"
           IMAGE_CACHE="${{ steps.cfg.outputs.registry }}/${{ steps.cfg.outputs.app_name }}:buildcache"
 
-          # Submit the what-time-is-it/ directory — it becomes /workspace in Cloud Build.
-          # The Dockerfile is maintained here because we cannot modify the upstream app repo.
-          gcloud builds submit what-time-is-it \
+          # Submit the hello-world/ directory — it becomes /workspace in Cloud Build.
+          # The Dockerfile lives next to server.py so the build context is self-contained.
+          gcloud builds submit hello-world \
             --project="${{ steps.cfg.outputs.project }}" \
             --region="${{ steps.cfg.outputs.region }}" \
             --config=cloudbuild.yaml \
@@ -161,27 +162,18 @@ jobs:
           echo "### Image built ✅" >> "$GITHUB_STEP_SUMMARY"
           echo "**Image**: \`${{ steps.image-ref.outputs.value }}\`" >> "$GITHUB_STEP_SUMMARY"
 
-  trigger-release:
-    name: Trigger blue/green deploy
-    runs-on: ubuntu-latest
+  # Single-region deploy via terraform.yml's reusable `deploy` job.
+  # No canary, no blue/green, no auto-rollback — this is the simple POC path.
+  deploy:
+    name: Deploy new image
     needs: build
     if: >-
       github.event_name != 'workflow_dispatch' ||
-      inputs.trigger_release == 'true'
+      inputs.trigger_deploy == 'true'
     permissions:
-      actions: write
-
-    steps:
-      - name: Dispatch release.yml
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              workflow_id: 'release.yml',
-              ref: 'main',
-              inputs: { image_ref: '${{ needs.build.outputs.image_ref }}' }
-            });
-            console.log('Triggered release.yml with image: ${{ needs.build.outputs.image_ref }}');
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/terraform.yml
+    with:
+      image_ref: ${{ needs.build.outputs.image_ref }}
+    secrets: inherit

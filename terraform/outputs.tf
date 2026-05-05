@@ -3,17 +3,29 @@ output "load_balancer_ip" {
   value       = module.what_time_is_it.load_balancer_ip
 }
 
-output "cloud_run_url_primary" {
-  description = "Direct Cloud Run URL in primary region (internal use / smoke tests)"
-  value       = module.what_time_is_it.cloud_run_url_primary
-}
-
-output "cloud_run_url_secondary" {
-  description = "Direct Cloud Run URL in secondary region (internal use / smoke tests)"
-  value       = module.what_time_is_it.cloud_run_url_secondary
+output "cloud_run_url" {
+  description = "Direct Cloud Run URL (internal use / smoke tests). Production traffic goes through the Load Balancer."
+  value       = module.what_time_is_it.cloud_run_url
 }
 
 output "artifact_registry_url" {
   description = "Artifact Registry repository base URL – used in CI/CD image tags"
   value       = module.what_time_is_it.artifact_registry_url
+}
+
+# Observability
+
+output "dashboard_url" {
+  description = "Direct console URL to the service overview dashboard. Open this in the demo browser to show 'unified dashboard' from the management summary."
+  value       = module.observability.dashboard_url
+}
+
+output "alert_policy_error_rate" {
+  description = "Resource ID of the high-error-rate alert policy."
+  value       = module.observability.alert_policy_error_rate
+}
+
+output "alert_policy_uptime" {
+  description = "Resource ID of the uptime-failure alert policy (null if no host configured)."
+  value       = module.observability.alert_policy_uptime
 }

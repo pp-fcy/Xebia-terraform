@@ -17,7 +17,7 @@ locals {
   # Artifact Registry base URL — used by CI/CD to tag and push images.
   registry_url = "${var.primary_region}-docker.pkg.dev/${var.project_id}/${var.app_name}"
   # Image is always supplied by the caller via var.container_image.
-  # CI/CD (release.yml) passes the newly built SHA-tagged image on every release.
+  # CI/CD passes the newly built SHA-tagged image on every release.
   # The first-ever terraform apply uses the variable default (hello-world).
   runtime_image = var.container_image
 }
@@ -138,11 +138,10 @@ module "cloud_armor" {
   depends_on = [google_project_service.apis]
 }
 
-# Cloud Run services are inlined (not via the external GoogleCloudPlatform module)
-# so that Terraform fully owns the image and traffic on every apply.
-# CI/CD passes container_image via -var; blue/green is achieved by targeting
-# the primary resource first, smoke-testing, then applying the full config.
-
+# Single Cloud Run service in the primary region.
+# This is the simple-POC version: no canary, no blue/green, no secondary.
+# CI/CD does a straight terraform apply with the new image on every push to main.
+# Adding HA later = re-introduce a `secondary` resource + extra NEG + LB backend.
 resource "google_cloud_run_v2_service" "primary" {
   project             = var.project_id
   name                = var.app_name
@@ -180,7 +179,7 @@ resource "google_cloud_run_v2_service" "primary" {
         timeout_seconds       = 3
         failure_threshold     = 5
         http_get {
-          path = "/"
+          path = "/healthz"
           port = 8080
         }
       }
@@ -190,7 +189,7 @@ resource "google_cloud_run_v2_service" "primary" {
         timeout_seconds   = 5
         failure_threshold = 3
         http_get {
-          path = "/"
+          path = "/healthz"
           port = 8080
         }
       }
@@ -213,76 +212,6 @@ resource "google_cloud_run_v2_service_iam_member" "primary_invoker" {
   member   = "allUsers"
 }
 
-resource "google_cloud_run_v2_service" "secondary" {
-  project             = var.project_id
-  name                = var.app_name
-  location            = var.secondary_region
-  ingress             = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
-  deletion_protection = false
-
-  template {
-    max_instance_request_concurrency = 80
-
-    scaling {
-      min_instance_count = var.min_instances
-      max_instance_count = var.max_instances
-    }
-
-    containers {
-      image = local.runtime_image
-
-      ports {
-        container_port = 8080
-      }
-
-      resources {
-        limits = {
-          cpu    = "1"
-          memory = "512Mi"
-        }
-        cpu_idle          = true
-        startup_cpu_boost = true
-      }
-
-      startup_probe {
-        initial_delay_seconds = 5
-        period_seconds        = 5
-        timeout_seconds       = 3
-        failure_threshold     = 5
-        http_get {
-          path = "/"
-          port = 8080
-        }
-      }
-
-      liveness_probe {
-        period_seconds    = 30
-        timeout_seconds   = 5
-        failure_threshold = 3
-        http_get {
-          path = "/"
-          port = 8080
-        }
-      }
-    }
-  }
-
-  traffic {
-    type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
-    percent = 100
-  }
-
-  depends_on = [google_project_service.apis, module.artifact_registry]
-}
-
-resource "google_cloud_run_v2_service_iam_member" "secondary_invoker" {
-  project  = var.project_id
-  location = var.secondary_region
-  name     = google_cloud_run_v2_service.secondary.name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-}
-
 resource "google_compute_region_network_endpoint_group" "primary" {
   project               = var.project_id
   name                  = "${var.app_name}-neg-${var.primary_region}"
@@ -294,19 +223,6 @@ resource "google_compute_region_network_endpoint_group" "primary" {
   }
 
   depends_on = [google_cloud_run_v2_service.primary]
-}
-
-resource "google_compute_region_network_endpoint_group" "secondary" {
-  project               = var.project_id
-  name                  = "${var.app_name}-neg-${var.secondary_region}"
-  network_endpoint_type = "SERVERLESS"
-  region                = var.secondary_region
-
-  cloud_run {
-    service = var.app_name
-  }
-
-  depends_on = [google_cloud_run_v2_service.secondary]
 }
 
 module "load_balancer" {
@@ -322,10 +238,9 @@ module "load_balancer" {
 
   backends = {
     default = {
-      description = "Primary and secondary Cloud Run backends"
+      description = "Primary Cloud Run backend"
       groups = [
         { group = google_compute_region_network_endpoint_group.primary.id },
-        { group = google_compute_region_network_endpoint_group.secondary.id }
       ]
       enable_cdn      = false
       security_policy = module.cloud_armor.policy.self_link

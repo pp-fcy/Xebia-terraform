@@ -4,21 +4,15 @@ variable "project_id" {
 }
 
 variable "primary_region" {
-  description = "Primary GCP region for Cloud Run (low-latency for EU users)"
+  description = "GCP region for the Cloud Run service"
   type        = string
   default     = "europe-west1"
-}
-
-variable "secondary_region" {
-  description = "Secondary GCP region for Cloud Run (HA failover)"
-  type        = string
-  default     = "europe-west4"
 }
 
 variable "app_name" {
   description = "Application name – used as a prefix for all resource names"
   type        = string
-  default     = "what-time-is-it"
+  default     = "hello-world"
 }
 
 variable "container_image" {
@@ -34,13 +28,27 @@ variable "domain" {
 }
 
 variable "min_instances" {
-  description = "Minimum warm Cloud Run instances per region (1 eliminates cold starts)"
+  description = "Minimum warm Cloud Run instances (1 eliminates cold starts)"
   type        = number
   default     = 1
 }
 
 variable "max_instances" {
-  description = "Maximum Cloud Run instances per region"
+  description = "Maximum Cloud Run instances"
   type        = number
   default     = 10
+}
+
+# ─── Observability (golden path) ─────────────────────────────────────────────
+
+variable "alert_notification_emails" {
+  description = "Email addresses that receive Cloud Monitoring alerts. Empty list = alert policies still created, no channel attached."
+  type        = list(string)
+  default     = []
+}
+
+variable "error_rate_threshold" {
+  description = "Errors per minute that trip the high-error-rate alert."
+  type        = number
+  default     = 5
 }

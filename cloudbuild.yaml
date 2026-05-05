@@ -1,16 +1,19 @@
-# Cloud Build config — builds the what-time-is-it app image.
+# Cloud Build config — builds the hello-world sample-service image.
 #
-# Source: the what-time-is-it/ directory submitted directly as the build source.
+# Source: the hello-world/ directory submitted directly as the build source.
 # Called via:
-#   gcloud builds submit what-time-is-it --config=cloudbuild.yaml \
+#   gcloud builds submit hello-world --config=cloudbuild.yaml \
 #     --substitutions=_IMAGE=...,_IMAGE_CACHE=...
 #
-# Submitting what-time-is-it/ (not the repo root) means Cloud Build's /workspace
+# Submitting hello-world/ (not the repo root) means Cloud Build's /workspace
 # is the app directory itself, so the Dockerfile is at /workspace/Dockerfile.
+#
+# build-image.yml passes _IMAGE and _IMAGE_CACHE every time, so the defaults
+# below are only used for ad-hoc local `gcloud builds submit` runs.
 
 substitutions:
-  _IMAGE:       "europe-west1-docker.pkg.dev/bux-project-490819/what-time-is-it/what-time-is-it:latest"
-  _IMAGE_CACHE: "europe-west1-docker.pkg.dev/bux-project-490819/what-time-is-it/what-time-is-it:buildcache"
+  _IMAGE:       "europe-west1-docker.pkg.dev/bux-project-490819/hello-world/hello-world:latest"
+  _IMAGE_CACHE: "europe-west1-docker.pkg.dev/bux-project-490819/hello-world/hello-world:buildcache"
 
 steps:
   - name: "gcr.io/cloud-builders/docker"

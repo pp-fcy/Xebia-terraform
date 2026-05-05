@@ -29,7 +29,7 @@ Each environment uses its **own GCS state prefix** so dev and prod state never m
 `container_image` is **not** set in either tfvars file. CI/CD always passes it as a `-var` flag:
 
 ```bash
-# CI/CD (release.yml / terraform.yml)
+# CI/CD (terraform.yml — called by build-image.yml after each successful build)
 terraform apply -var-file=env/prod.tfvars -var="container_image=<registry>/<name>:<sha>"
 
 # Local — pass explicitly or rely on the hello-world default for bootstrap

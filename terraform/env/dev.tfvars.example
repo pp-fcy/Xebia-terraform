@@ -15,10 +15,9 @@
 # Use a distinct app_name to avoid clashing with production resources.
 ##############################################################################
 
-project_id       = "my-gcp-project-id"
-primary_region   = "europe-west1"
-secondary_region = "europe-west4"
-app_name         = "what-time-is-it-dev"
+project_id     = "my-gcp-project-id"
+primary_region = "europe-west1"
+app_name       = "hello-world-dev"
 
 domain = ""
 

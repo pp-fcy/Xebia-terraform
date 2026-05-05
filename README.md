@@ -1,82 +1,167 @@
-# BUX DevOps Assignment – `what-time-is-it` on GCP
+# FinCore IDP — Walking-Stick Demo
 
-Infrastructure-as-Code repository for running
-[`buxapp/what-time-is-it`](https://github.com/buxapp/what-time-is-it) on
-Google Cloud Platform with:
+> Xebia Platform Architect Assessment · Chaoyang Fan · 2026
+>
+> **Audience:** VP of Engineering · Senior Cloud Engineer
+> **Companion docs:** [Management Summary](#management-summary) · [Platform Operating Model](docs/PLATFORM_OPERATING_MODEL.md) · [IDP Architecture](docs/IDP_ARCHITECTURE.md) · [Service Template / Golden Path](docs/SERVICE_TEMPLATE.md) · [30-min Demo Script](docs/DEMO_SCRIPT.md)
 
-- **Terraform** – all infrastructure defined as code
-- **Cloud Run** – serverless containers in two regions (HA)
-- **Global HTTPS Load Balancer** – anycast IP, TLS termination, geo routing
-- **Cloud Armor** – WAF (OWASP CRS) + adaptive DDoS + rate limiting
-- **GitHub Actions** – blue/green CI/CD with canary smoke tests
+A working **Internal Developer Platform** demo for the FinCore Systems
+Platform Architect assessment. The repo doubles as **(a)** the platform
+golden-path service template and **(b)** a sample service consuming the
+golden path end-to-end on Google Cloud.
 
-### Application container image
+The four "walking stick" requirements from the assignment are all live:
 
-The **`Dockerfile`** builds the Kotlin app from the public assignment repo **[buxapp/what-time-is-it](https://github.com/buxapp/what-time-is-it)** (clone + `./mvnw package`), not from a pre-published base image.
-
-**Use your fork** (after forking on GitHub):
-
-```bash
-docker build --build-arg APP_REPO=https://github.com/<your-user>/what-time-is-it.git .
-# optional branch/tag:
-docker build --build-arg APP_REPO=https://github.com/<your-user>/what-time-is-it.git --build-arg APP_REF=main .
-```
-
-In **GitHub Actions**, set optional repository **Variables**:
-
-| Name | Purpose |
-|------|--------|
-| `APP_SOURCE_REPO` | e.g. `https://github.com/your-org/what-time-is-it.git` (defaults to `buxapp` if unset) |
-| `APP_SOURCE_REF` | Branch or tag to build (leave empty for the repo default branch) |
-
-If `./mvnw package` fails (e.g. legacy Maven repos), fork **[buxapp/what-time-is-it](https://github.com/buxapp/what-time-is-it)**, update `pom.xml` repositories if needed, and point `APP_SOURCE_REPO` at your fork.
-
-### Trigger CI when the app repo changes (cross-repo)
-
-`ci.yml` also listens for **`repository_dispatch`** with event type **`what-time-is-it-updated`**.
-
-1. In **BUX-task** (this repo): no extra config — the workflow is already wired.
-2. In **what-time-is-it** (your fork): add a **PAT** secret that can call `repository_dispatch` on BUX-task:
-   - Classic PAT: **`repo`** scope (or fine-grained: access to the BUX-task repo with **Contents: Read** + **Metadata**; confirm PAT can hit the [repository dispatch API](https://docs.github.com/en/rest/repos/repos#create-a-repository-dispatch-event)).
-   - Secret name: **`BUX_TEST_DISPATCH_TOKEN`**
-3. Copy **[`.github/workflows-examples/what-time-is-it-dispatch-bux-task.yml`](.github/workflows-examples/what-time-is-it-dispatch-bux-task.yml)** to the app repo as **`.github/workflows/dispatch-bux-task.yml`** and set **`repository:`** to your devops repo (e.g. `pp-fcy/BUX-task`).
-
-On **push** to `main`/`master` in the app repo, that workflow notifies BUX-task. The CI job then clones **`client_payload.repository`** at **`client_payload.ref`**, so the image matches the commit that was pushed (set **`APP_SOURCE_REPO` / `APP_SOURCE_REF`** only for PR builds or when not using dispatch).
-
-Production **`release.yml`** is still **manual** (`workflow_dispatch`) unless you add a separate dispatch trigger there.
+| Requirement | Where it lives in this repo |
+|---|---|
+| One sample service in a repo | [`hello-world/`](hello-world/) — minimal Hello World HTTP server (stdlib Python, returns `Hello World` on `/` and `ok` on `/healthz`) |
+| Infra-as-Code provisioning of a basic cloud resource | [`terraform/`](terraform/) — Cloud Run, Artifact Registry, Global LB, Cloud Armor |
+| Automated pipeline that deploys on push | [`.github/workflows/`](.github/workflows/) — pre-commit → terraform plan/apply → build → deploy + smoke test |
+| Simple observability setup | [`terraform/modules/observability/`](terraform/modules/observability/) — dashboard, log-based error metric, uptime check, alert policy |
 
 ---
 
-## Architecture
+## Management Summary
+
+**Situation.** FinCore Systems must launch its SaaS platform in 6 months to
+avoid permanent loss of market trust. 17 product teams are stalled by a
+**Gatekeeper model** — every infra change requires manual Cloud Engineering
+intervention. Slow delivery, fragile deployments, no self-service,
+uncontrolled cloud costs.
+
+**Proposal.** Transform Cloud Engineering from manual bottleneck into an
+**Enabling Platform Team** that builds and maintains an Internal Developer
+Platform. The 17 product teams operate as autonomous, stream-aligned
+consumers of golden paths — self-serving without sacrificing security,
+stability, or observability.
+
+**This repo demonstrates Phase 01 (Foundation) of that plan.**
+
+| Outcome | Today (Gatekeeper) | After Phase 01 (this demo) |
+|---------|---------------------|---------------------------|
+| Deployment frequency | 1× per sprint | Daily, on push |
+| Lead time for change | ~5 days | < 1 day |
+| New service to first deploy | ~3 days of tickets | < 2 hours, zero tickets |
+| Observability shape | Per-team, ad-hoc | Identical golden-path dashboard per service |
+| Cloud creds in CI | Static SA keys | Workload Identity Federation, no static creds |
+| Smoke test on every release | None | Built into the deploy job (`/` and `/healthz` checks; failed test fails the run) |
+
+The 6-month roadmap, success metrics, and 40% cost reduction story (multi-tenant
+migration in Phase 03) are in the separate
+[Management Summary PDF](https://github.com/pp-fcy/BUX-task) delivered
+24 hours before the presentation per the assignment.
+
+---
+
+## How to read this repo
+
+Three audiences, three reading orders:
+
+**For the VP of Engineering** (you):
+1. This README's [Management Summary](#management-summary) above.
+2. [docs/PLATFORM_OPERATING_MODEL.md](docs/PLATFORM_OPERATING_MODEL.md) — RACI, Team Topologies, success metrics.
+3. [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) — what the 30 minutes will look like.
+
+**For the Senior Cloud Engineer**:
+1. [docs/IDP_ARCHITECTURE.md](docs/IDP_ARCHITECTURE.md) — 5-layer IDP map, runtime diagram, trade-offs.
+2. [terraform/modules/observability/README.md](terraform/modules/observability/README.md) — the observability golden path.
+3. [.github/workflows/](.github/workflows/) — the actual pipelines.
+
+**For a product-team developer onboarding** (the future state):
+1. [docs/SERVICE_TEMPLATE.md](docs/SERVICE_TEMPLATE.md) — 9 steps, < 2 hours to first deploy.
+2. The [Bootstrap](#bootstrap-first-time-setup) section below.
+
+---
+
+## Architecture (one picture)
 
 ```
-Internet
-   │
-   ▼
-┌──────────────────────────────────────────────────────────┐
-│  Global External HTTPS Load Balancer  (static anycast IP) │
-│  + Cloud Armor (WAF / DDoS / rate-limit)                  │
-└──────────────┬───────────────────────────────┬───────────┘
-               │                               │
-     Serverless NEG                   Serverless NEG
-               │                               │
-   ┌───────────▼──────────┐       ┌────────────▼─────────┐
-   │  Cloud Run           │       │  Cloud Run            │
-   │  europe-west1        │       │  europe-west4         │
-   │  (primary)           │       │  (secondary / HA)     │
-   └──────────────────────┘       └───────────────────────┘
-               │                               │
-        Artifact Registry  ◄──── GitHub Actions (WIF, no keys)
+                            DEVELOPER (product team)
+                                       │
+                                       │ git push
+                                       ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ GitHub Actions (Workload Identity Federation, no static creds)             │
+│                                                                             │
+│   pre-commit ──► terraform plan/apply ──► build (Cloud Build) ──► deploy   │
+│                                                                  │          │
+│                                                       terraform apply       │
+│                                                       + smoke test (/, /healthz) │
+└─────────────────────────────────────┬───────────────────────────────────────┘
+                                      │
+                                      ▼
+                ┌────────────────────────────────────────────┐
+                │   Global HTTPS LB (anycast IP)             │
+                │   + Cloud Armor (OWASP CRS, rate limiting) │
+                └────────────────────┬───────────────────────┘
+                                     │
+                          ┌──────────▼─────────┐
+                          │  Cloud Run         │
+                          │  europe-west1      │
+                          └──────────┬─────────┘
+                                     │ logs · metrics
+                                     ▼
+              ┌────────────────────────────────────────────────┐
+              │  Cloud Monitoring — golden-path observability  │
+              │  Dashboard · Log-based metric · Uptime · Alert │
+              └────────────────────────────────────────────────┘
 ```
 
-Key design decisions:
-- Cloud Run ingress is set to `INTERNAL_LOAD_BALANCER` – services are **not**
-  directly reachable from the internet; all traffic flows through the LB and
-  Cloud Armor.
-- GitHub Actions authenticates via **Workload Identity Federation** (no
-  long-lived service account keys stored in GitHub Secrets).
-- Terraform fully owns the Cloud Run image. `container_image` is passed as
-  `-var` on every apply so plan and state always reflect what is deployed.
+> Single-region by design. The walking stick is a **simple POC** — adding HA
+> (a second Cloud Run + extra NEG + LB backend) is a focused module change
+> the platform team can ship in one sprint when the launch readiness phase
+> needs it. See [IDP_ARCHITECTURE.md](docs/IDP_ARCHITECTURE.md#trade-offs).
+
+Detailed 5-layer IDP map and trade-offs in
+[docs/IDP_ARCHITECTURE.md](docs/IDP_ARCHITECTURE.md).
+
+---
+
+## Why Cloud Run for the walking stick (and not GKE)
+
+The management summary describes a future-state on **shared GKE + Istio +
+ArgoCD** with Kubernetes namespaces for tenant isolation. The walking stick
+is on **Cloud Run** because:
+
+- It exercises every IDP idea (IaC, golden paths, automated promotion, observability) at a fraction of the build cost.
+- A simple deploy + smoke-test pipeline ships in days, not weeks.
+- The Terraform module boundary is the seam: replacing the contents of `modules/what-time-is-it/` with a Helm chart + ArgoCD `Application` is a drop-in change. Product teams keep calling `module "service" { ... }`.
+
+This is consciously a "buy time, decide later" trade. The assignment explicitly
+says **don't over-engineer the demo**.
+
+---
+
+## Application container image
+
+The **`Dockerfile`** in [`hello-world/`](hello-world/) is a single-stage
+`python:3.12-alpine` image that runs the stdlib HTTP server in
+[`server.py`](hello-world/server.py). No upstream repo, no Maven build, no app
+dependencies — kept deliberately small so the demo's attention stays on the
+platform (pipeline, IaC, observability) rather than on the workload.
+
+```bash
+# Build and run locally
+docker build -t hello-world hello-world/
+docker run --rm -p 8080:8080 hello-world
+curl http://localhost:8080/         # → Hello World
+curl http://localhost:8080/healthz  # → ok
+
+# Override the response without rebuilding (env vars in server.py)
+docker run --rm -p 8080:8080 -e HELLO_MESSAGE="Bonjour FinCore" hello-world
+```
+
+A product team that adopts this template replaces `server.py` and `Dockerfile`
+with their real workload and inherits the rest of the platform unchanged.
+
+### Optional: build on push from a separate app repo
+
+`build-image.yml` also listens for **`repository_dispatch`** with event type
+**`hello-world-updated`** so a product team can keep their service code in
+its own repo and have this platform repo build/deploy it on each push. Wire
+the dispatch using the example workflow at
+[`.github/workflows-examples/`](.github/workflows-examples/). For the
+walking-stick demo this is unused — the sample service lives in this same repo.
 
 ---
 
@@ -92,19 +177,10 @@ A GCP project with a billing account attached.
 
 ### Local checks (pre-commit)
 
-Optional hooks run before each commit to keep Terraform and YAML consistent.
-
 ```bash
 pip install -r requirements-dev.txt
 pre-commit install
-
-# One-time: TFLint Google plugin (required for terraform_tflint hook)
 cd terraform && tflint --init && cd ..
-```
-
-Run all hooks manually:
-
-```bash
 pre-commit run --all-files
 ```
 
@@ -118,25 +194,28 @@ WIF is **project-level** identity setup (not in app Terraform). Run once per GCP
 
 ```bash
 # Defaults are set in the script for this repo (bux-project-490819 + pp-fcy/BUX-task).
-./scripts/bootstrap-wif.sh
+./scripts/init-project.sh
 
 # Or override:
 # export GCP_PROJECT_ID="other-project"
-# export GITHUB_REPO="org/other-repo"   # org/repo — not the full https://github.com/... URL
-# ./scripts/bootstrap-wif.sh
+# export GITHUB_REPO="org/other-repo"
+# ./scripts/init-project.sh
 ```
 
-The script prints `WORKLOAD_IDENTITY_PROVIDER` and `GCP_SERVICE_ACCOUNT` values for GitHub Actions secrets (see [GitHub Repository Setup](#github-repository-setup)).
-
-Optional overrides: `WIF_POOL_ID`, `WIF_PROVIDER_ID`, `GITHUB_ACTIONS_SA_ID`.
+The script prints `WORKLOAD_IDENTITY_PROVIDER` and `GCP_SERVICE_ACCOUNT` values
+for GitHub Actions secrets.
 
 ### 2. Terraform state bucket (GCS)
 
-State lives in **one bucket** with **different prefixes per environment** (see `terraform/env/*.backend.hcl.example`). Root **`terraform/backend.tf`** only declares `backend "gcs" {}`; bucket/prefix come from those files at `terraform init`.
+State lives in **one bucket** with **different prefixes per environment** (see
+`terraform/env/*.backend.hcl.example`). Root **`terraform/backend.tf`** only
+declares `backend "gcs" {}`; bucket/prefix come from those files at
+`terraform init`.
 
-Example: **`gs://cfan-bux-tfstate`**, prefixes **`what-time-is-it/state`** (prod) and **`what-time-is-it/dev/state`** (dev).
+Example: **`gs://cfan-bux-tfstate`**, prefixes **`what-time-is-it/state`** (prod)
+and **`what-time-is-it/dev/state`** (dev).
 
-If the bucket does not exist yet in your GCP org:
+If the bucket does not exist yet:
 
 ```bash
 gsutil mb -l europe-west1 gs://cfan-bux-tfstate
@@ -145,7 +224,8 @@ gsutil versioning set on gs://cfan-bux-tfstate
 
 ### 3. Configure Terraform (production vs dev)
 
-**`terraform/env/prod.tfvars`** and **`terraform/env/prod.backend.hcl`** are committed — no copying needed for production. CI/CD uses them directly.
+**`terraform/env/prod.tfvars`** and **`terraform/env/prod.backend.hcl`** are
+committed — no copying needed for production. CI/CD uses them directly.
 
 **Production:**
 
@@ -156,35 +236,43 @@ terraform plan  -var-file=env/prod.tfvars
 terraform apply -var-file=env/prod.tfvars
 ```
 
-**Dev (local sandbox, not used by CI/CD)** — copy the examples and edit with a different project/app_name to avoid clashing with prod:
+**Dev (local sandbox)** — copy the examples and edit with a different project:
 
 ```bash
-cp terraform/env/dev.backend.hcl.example terraform/env/dev.backend.hcl   # edit bucket if needed
-cp terraform/env/dev.tfvars.example       terraform/env/dev.tfvars         # edit project_id, app_name
+cp terraform/env/dev.backend.hcl.example terraform/env/dev.backend.hcl
+cp terraform/env/dev.tfvars.example       terraform/env/dev.tfvars
 ./scripts/terraform-init-env.sh dev
 cd terraform
 terraform plan  -var-file=env/dev.tfvars
 terraform apply -var-file=env/dev.tfvars
 ```
 
-See **`terraform/env/README.md`**. Switching environments: run **`./scripts/terraform-init-env.sh prod`** or **`dev`** again (`-reconfigure`).
-
 ### 4. Apply
 
 ```bash
 cd terraform
-# After ./scripts/terraform-init-env.sh prod (or dev):
-terraform plan  -var-file=env/prod.tfvars   # or env/dev.tfvars
-terraform apply -var-file=env/prod.tfvars   # or env/dev.tfvars
+terraform plan  -var-file=env/prod.tfvars
+terraform apply -var-file=env/prod.tfvars
 ```
 
-Terraform will output:
-- `load_balancer_ip` – point your DNS A-record here; set as `LB_HOSTNAME` GitHub variable in BUX-task
-- `artifact_registry_url` – set as `ARTIFACT_REGISTRY_URL` in the **app repo's** GitHub variables (not BUX-task)
+Terraform outputs:
+- `load_balancer_ip` — point your DNS A-record here
+- `dashboard_url` — direct console URL for the **service overview dashboard** (open this in the demo)
+- `artifact_registry_url` — set as `ARTIFACT_REGISTRY_URL` in the **app repo's** GitHub variables
 
-**Layout:** the app stack lives in **`terraform/modules/what-time-is-it/`**; root **`terraform/main.tf`** only calls `module "what_time_is_it"`.
+**Layout:**
 
-WIF secrets (`WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`) come from `./scripts/bootstrap-wif.sh`, not Terraform.
+```
+terraform/
+├── main.tf                   # composes the two modules below
+├── modules/
+│   ├── what-time-is-it/      # service stack (Cloud Run, LB, Armor, AR)
+│   └── observability/        # golden-path observability (NEW)
+└── env/                      # backend + tfvars per environment
+```
+
+WIF secrets (`WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`) come from
+`./scripts/init-project.sh`, not Terraform.
 
 ---
 
@@ -192,120 +280,98 @@ WIF secrets (`WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`) come from `./s
 
 ### Variables (Settings → Secrets and variables → Actions → Variables)
 
-Terraform config (regions, bucket, prefix) lives in committed files — no Terraform-specific variables needed. The only runtime variables BUX-task workflows use are:
-
 | Name | Example value | Used by |
 |------|--------------|---------|
 | `GCP_PROJECT_ID` | `bux-project-490819` | `terraform.yml` (identity display) |
-| `LB_HOSTNAME` | `34.x.x.x` or `time.example.com` | `release.yml` smoke test |
+| `LB_HOSTNAME` | `34.x.x.x` or `time.example.com` | Optional — point your DNS at this if you set a custom domain |
 
-> **Docker image variables** (`ARTIFACT_REGISTRY_URL`, `GCP_REGION_PRIMARY`, `GCP_REGION_SECONDARY`, etc.) belong in the **app repo's** GitHub settings, not here. See the dispatch example workflow header for the full list.
+Docker image variables (`ARTIFACT_REGISTRY_URL`, `GCP_REGION_PRIMARY`) belong
+in the **app repo's** GitHub settings if you split repos, not here.
 
-### Secrets (Settings → Secrets and variables → Actions → Secrets)
+### Secrets
 
 | Name | How to get it |
 |------|--------------|
-| `WORKLOAD_IDENTITY_PROVIDER` | Output of `./scripts/bootstrap-wif.sh` (full provider resource name) |
-| `GCP_SERVICE_ACCOUNT` | Output of `./scripts/bootstrap-wif.sh` (service account email) |
+| `WORKLOAD_IDENTITY_PROVIDER` | Output of `./scripts/init-project.sh` |
+| `GCP_SERVICE_ACCOUNT` | Output of `./scripts/init-project.sh` |
 
 **Important**
 
-- **Dependabot PRs** do **not** use repository Actions secrets by default. Add the **same secret names** under **Settings → Secrets and variables → Dependabot** (or the workflow cannot authenticate).
-- **Pull requests from forks** never receive your repository secrets; the CI workflow that deploys to GCP is **skipped** for those PRs.
-- **`release.yml`** jobs that use the **`production`** GitHub Environment must have these secrets available to that environment: add **`WORKLOAD_IDENTITY_PROVIDER`** and **`GCP_SERVICE_ACCOUNT`** under **Settings → Environments → `production` → Environment secrets** if repository secrets are not inherited as you expect.
-
-### Verify GitHub Actions / Environment (CLI)
-
-From your laptop (requires [GitHub CLI](https://cli.github.com/) and `gh auth login`):
-
-```bash
-./scripts/check-github-actions-environment.sh
-# or
-./scripts/check-github-actions-environment.sh pp-fcy/BUX-task
-```
-
-This lists **environment names**, **Actions variable names**, and **secret names** (values are never shown). It checks that `WORKLOAD_IDENTITY_PROVIDER` and `GCP_SERVICE_ACCOUNT` exist either as **repository** secrets or on the **`production`** environment.
-
-**One-liners** (same idea):
-
-```bash
-gh secret list -R pp-fcy/BUX-task
-gh secret list -R pp-fcy/BUX-task --env production
-gh api repos/pp-fcy/BUX-task/environments/production
-```
-
-**Create missing *repository* WIF secrets** (same values as `production` environment; uses `gcloud` + `gh`):
-
-```bash
-./scripts/set-github-repo-wif-secrets.sh
-# or: GITHUB_REPO=pp-fcy/BUX-task GCP_PROJECT_ID=bux-project-490819 ./scripts/set-github-repo-wif-secrets.sh
-```
-
-**Manual `gh` one-liners** (paste your real values):
-
-```bash
-gh secret set WORKLOAD_IDENTITY_PROVIDER -R pp-fcy/BUX-task -b"projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider"
-gh secret set GCP_SERVICE_ACCOUNT -R pp-fcy/BUX-task -b"github-actions-sa@bux-project-490819.iam.gserviceaccount.com"
-```
+- **Dependabot PRs** do not use repository Actions secrets by default. Add the same secret names under **Settings → Secrets and variables → Dependabot**.
+- **Pull requests from forks** never receive your repository secrets; the deploy workflow is **skipped** for those PRs.
+- The `apply` and `deploy` jobs in **`terraform.yml`** use the **`production`** GitHub Environment — make sure the WIF secrets are available there (or are inherited from repository secrets).
 
 ---
 
-## CI/CD Workflows
+## CI/CD Workflows — the IDP delivery layer
 
-### On pull request (`ci.yml`)
+Three workflows in `.github/workflows/` (plus a manual `destroy.yml`) are the
+platform team's contribution to every product team's repo. A product team using
+the template inherits them unchanged.
+
+### On pull request
 
 ```
 PR opened / updated
-  └─ Build Docker image (layer-cached)
-  └─ Push to Artifact Registry with :sha and :pr-N tags
-  └─ Deploy new revision with 0% traffic + tag `pr-<N>` (primary + secondary)
-  └─ Smoke test the tagged preview URL
-  └─ Post preview URL as PR comment
+  └─ pre-commit  (terraform fmt/validate, file hygiene)
+  └─ terraform plan  (gated on pre-commit; posts diff as PR comment)
 ```
 
-The new revision is live and testable but receives **zero production traffic**.
-
-### On merge to main (`release.yml`)
+### On push to main
 
 ```
-Push to main
-  └─ Re-tag image as :latest
-  └─ (parallel) Primary region:
-  │   └─ Deploy new revision, 0% traffic
-  │   └─ Shift 10% → smoke test (10 requests via LB/Cloud Armor)
-  │   └─ Shift 100% (promote)
-  │   └─ Rollback to previous revision on any failure
-  └─ (parallel) Secondary region:
-      └─ Same flow, smoke test via direct Cloud Run URL
+push to main
+  ├─ pre-commit
+  ├─ terraform apply (only if terraform/ files changed, image preserved from state)
+  └─ build-image    (only if hello-world/ files changed; Cloud Build, layer-cached)
+       └─ deploy   (calls terraform.yml's deploy job)
+            ├─ terraform apply with the new image
+            └─ smoke test:  GET / → "Hello World",  GET /healthz → "ok"
+            (smoke test failure fails the run; manual re-deploy of a previous
+             image via workflow_dispatch is the rollback path)
 ```
+
+The `pre-commit` workflow is the **hard gate** — `terraform.yml` and
+`build-image.yml` both fire via `workflow_run` only after it succeeds.
+
+### Concurrency
+
+All Terraform jobs share the `terraform-production` concurrency group so
+no two plan/apply/deploy runs touch state in parallel. The single exception
+is reusable `workflow_call` runs (deploy invoked from `build-image.yml`) which
+use a unique group per run-id to avoid deadlocking with the calling workflow.
 
 ---
 
-## Blue/Green Deployment Details
+## Observability — the golden path
 
-Cloud Run supports **traffic splitting natively**. Each `gcloud run deploy`
-creates a new immutable revision. Traffic is shifted separately:
+`terraform/modules/observability/` is the most reusable part of the platform.
+Drop-in for any service:
 
+```hcl
+module "observability" {
+  source = "./modules/observability"
+
+  project_id     = var.project_id
+  app_name       = var.app_name
+  primary_region = var.primary_region
+  uptime_check_host = module.what_time_is_it.load_balancer_ip
+  alert_notification_emails = ["platform-oncall@fincore.example"]
+}
 ```
-Revision A  (old – currently serving 100%)
-Revision B  (new – just deployed with --no-traffic)
 
-Canary phase:
-  Revision A: 90% | Revision B: 10%
+Provisions:
+- **Cloud Monitoring dashboard** (`dashboard_url` output) — req/s, instance count, p50/p95/p99 latency, 5xx rate, error log rate.
+- **Log-based metric** counting `severity>=ERROR` Cloud Run log entries.
+- **Uptime check** against the LB.
+- **Alert policies** for high error rate and uptime failure, optionally wired to email channels.
 
-Promotion:
-  Revision A: 0%  | Revision B: 100%  (--to-latest)
-```
-
-If the smoke test fails at 10%, the workflow's `on: failure` step runs:
-```bash
-gcloud run services update-traffic ... --to-revisions="<old>=100"
-```
-This restores the previous state within seconds.
+Same module, same shape, every service. On-call rotates without retraining.
+See [terraform/modules/observability/README.md](terraform/modules/observability/README.md).
 
 ---
 
-## Security Highlights
+## Security highlights
 
 | Control | Implementation |
 |---------|---------------|
@@ -314,29 +380,26 @@ This restores the previous state within seconds.
 | DDoS | Cloud Armor adaptive protection (Layer 7) |
 | Rate limiting | 100 req/min per IP; 5-min ban at 300 req/min |
 | TLS | Google-managed certificate (auto-renewed) |
-| CI/CD auth | Workload Identity Federation (no SA keys) |
-| Runtime SA | Dedicated SA per Cloud Run service, no roles assigned by default |
+| CI/CD auth | Workload Identity Federation — no SA keys |
+| Runtime SA | Dedicated SA per Cloud Run service, no roles by default |
 | Image lifecycle | Artifact Registry retention: keep 10 latest, delete after 30 days |
 
 ---
 
-## Cutting Corners (and how to fix them)
+## What we cut from the walking stick (and when we add it back)
 
-The following would be done with more time:
+The assignment says **don't over-engineer**. These are the intentional cuts:
 
-1. **No `terraform plan` in CI** – A proper setup posts the plan diff as a PR
-   comment. Requires a GCS state bucket and WIF bootstrap (chicken-and-egg).
+| Cut | Why | When |
+|-----|-----|------|
+| Multi-region HA (second Cloud Run + extra LB backend) | Walking stick is a simple POC — adding a second region is a focused module change, not a platform redesign | Launch-readiness phase, ahead of go-live |
+| Canary / blue-green / progressive delivery | Out of scope for the POC. Smoke test on the new revision + manual `workflow_dispatch` rollback to a prior image is enough to demo safe delivery | When traffic + revenue justify the operational overhead |
+| Multi-tenant isolation (GKE + Istio namespaces) | Cloud Run is single-tenant by design | Phase 03, weeks 11–16 |
+| Distributed tracing (OTel + Cloud Trace) | App-side instrumentation is a code change | Sprint after Foundation |
+| Policy-as-code (Checkov / OPA) | Fits as a pre-commit hook | Phase 02, week 7 |
+| FinOps / per-tenant cost attribution | Needs billing-export → BigQuery | Phase 02, weeks 7–10 |
+| Service catalog / portal (Backstage or similar) | Out of scope — the golden path today is just GitHub CI/CD | Post-launch when there are >5 services and discoverability matters |
+| `terraform plan` posted as PR comment for the observability module | Separate state would require its own bucket prefix | Trivial extension; single state today keeps demo simple |
 
-2. **No Checkov / tfsec** – Security scanning of Terraform would be added to
-   the pre-commit / CI checks (e.g. `.pre-commit-config.yaml` / `pre-commit.yml`).
-
-3. **No alerting** – Cloud Monitoring alerts on error rate/latency p99 should
-   be wired to auto-trigger rollback via a Cloud Function or Pub/Sub.
-
-4. **Secondary region HA behaviour** – The LB will route around an unhealthy
-   backend automatically, but there is no explicit health check configuration
-   beyond the default. Custom health check paths would make this more explicit.
-
-5. **`min_instances = 1`** – Keeps the app warm to eliminate cold starts, but
-   costs ~€5/month/region even at zero traffic. Setting to 0 in secondary
-   and relying on the LB failover window is a valid cost trade-off.
+Everything cut is documented somewhere (this section, `docs/IDP_ARCHITECTURE.md`,
+the management summary roadmap). Nothing is silently missing.
