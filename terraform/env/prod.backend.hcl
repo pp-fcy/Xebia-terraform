@@ -1,2 +1,2 @@
 bucket = "cfan-bux-tfstate"
-prefix = "hellow-world/state"
+prefix = "hello-world/state"
