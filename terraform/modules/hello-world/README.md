@@ -1,50 +1,44 @@
-# Module: `what-time-is-it`
+# Module: `hello-world`
 
-> Module path is historical — the sample service in this repo is now
-> [`hello-world/`](../../../hello-world/). The module name is preserved so
-> existing state references don't churn.
+Deploys the full application stack for a single Cloud Run service:
 
-Deploys a single-region Cloud Run service on GCP behind a Global HTTPS Load
-Balancer, plus the security and registry plumbing it needs:
+- **Artifact Registry** — Docker repository with cleanup policies (keep 10 latest, delete after 30 days)
+- **Cloud Run v2** — serverless container service, internal ingress (LB only)
+- **Cloud Armor** — WAF + DDoS protection (OWASP CRS rules: SQLi, XSS, LFI, RFI, RCE, Scanner; rate-limit 100 req/min/IP)
+- **Global HTTP(S) Load Balancer** — optional managed SSL certificate when `domain` is set
 
-- Required APIs (`google_project_service`)
-- Artifact Registry (Docker) with cleanup policy
-- Cloud Armor (WAF / OWASP CRS + rate limiting)
-- Single-region Cloud Run with `INTERNAL_LOAD_BALANCER` ingress
-- Serverless NEG + Global HTTPS Load Balancer
-
-No canary, no blue/green, no second region — by design. See the cuts table in
-[`docs/IDP_ARCHITECTURE.md`](../../../docs/IDP_ARCHITECTURE.md#what-is-intentionally-not-in-the-walking-stick).
-
-## Usage (from root)
+## Usage
 
 ```hcl
-module "what_time_is_it" {
-  source = "./modules/what-time-is-it"
+module "hello_world" {
+  source = "./modules/hello-world"
 
   project_id      = var.project_id
-  primary_region  = "europe-west1"
-  app_name        = "hello-world"
-  container_image = "..."   # passed via -var in CI; defaults to a public hello-world for bootstrap
-  domain          = ""
-  min_instances   = 1
-  max_instances   = 10
+  primary_region  = var.primary_region
+  app_name        = var.app_name
+  container_image = var.container_image
+  domain          = var.domain
+  min_instances   = var.min_instances
+  max_instances   = var.max_instances
 }
 ```
 
-## container_image
+## Inputs
 
-`container_image` is **not** stored in tfvars. It is passed at apply time:
+| Name | Description | Required |
+|---|---|---|
+| `project_id` | GCP project ID | yes |
+| `primary_region` | GCP region (e.g. `europe-west1`) | yes |
+| `app_name` | Application name — used as Cloud Run service name and Artifact Registry repo ID | yes |
+| `container_image` | Full image reference to deploy | yes |
+| `domain` | Custom domain for managed SSL cert (leave empty for HTTP-only) | no |
+| `min_instances` | Minimum Cloud Run instances | no |
+| `max_instances` | Maximum Cloud Run instances | no |
 
-```bash
-terraform apply \
-  -var-file=env/prod.tfvars \
-  -var="container_image=europe-west1-docker.pkg.dev/<project>/<repo>/<name>:<sha>"
-```
+## Outputs
 
-The variable defaults to `us-docker.pkg.dev/cloudrun/container/hello:latest` so
-the very first infrastructure bootstrap works without a built image.
-
-CI/CD (the `deploy` job in `.github/workflows/terraform.yml`, called by
-`build-image.yml`) always overrides this with the SHA-tagged image built in the
-same pipeline run.
+| Name | Description |
+|---|---|
+| `load_balancer_ip` | Global LB static IP |
+| `cloud_run_url` | Direct Cloud Run URL (internal only) |
+| `artifact_registry_url` | Artifact Registry base URL |

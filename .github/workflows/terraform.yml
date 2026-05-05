@@ -107,7 +107,7 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           IMG=$(terraform state show \
-            'module.what_time_is_it.google_cloud_run_v2_service.primary' 2>/dev/null \
+            'module.hello_world.google_cloud_run_v2_service.primary' 2>/dev/null \
             | grep '^\s*image\s*=' | head -1 \
             | sed 's/.*= *"\(.*\)"/\1/' || echo "")
           echo "value=${IMG:-us-docker.pkg.dev/cloudrun/container/hello:latest}" >> "$GITHUB_OUTPUT"
@@ -230,7 +230,7 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           IMG=$(terraform state show \
-            'module.what_time_is_it.google_cloud_run_v2_service.primary' 2>/dev/null \
+            'module.hello_world.google_cloud_run_v2_service.primary' 2>/dev/null \
             | grep '^\s*image\s*=' | head -1 \
             | sed 's/.*= *"\(.*\)"/\1/' || echo "")
           echo "value=${IMG:-us-docker.pkg.dev/cloudrun/container/hello:latest}" >> "$GITHUB_OUTPUT"

@@ -1,14 +1,11 @@
-# Root composition for the FinCore IDP walking-stick demo.
+# Root composition – two modules stitched together:
 #
-# Two modules are stitched together here:
-#
-#   1. `what_time_is_it` — the sample service (Cloud Run + LB + Cloud Armor +
+#   1. `hello_world`   — the sample service (Cloud Run + LB + Cloud Armor +
 #      Artifact Registry). Single region — no canary, no blue/green.
-#   2. `observability`   — the golden-path observability baseline (dashboard +
-#      log-based error metric). Same module is reused by every service so
-#      on-call sees a consistent shape.
+#   2. `observability` — golden-path observability baseline (dashboard +
+#      log-based error metric).
 
-module "what_time_is_it" {
+module "hello_world" {
   source          = "./modules/hello-world"
   project_id      = var.project_id
   primary_region  = var.primary_region

@@ -26,7 +26,7 @@ module "observability" {
   primary_region = var.primary_region
 
   # Optional — wire to the LB IP exported from your service module
-  uptime_check_host = module.what_time_is_it.load_balancer_ip
+  uptime_check_host = module.hello_world.load_balancer_ip
   uptime_check_path = "/"
 
   alert_notification_emails = ["platform-oncall@fincore.example"]
