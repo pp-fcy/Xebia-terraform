@@ -39,16 +39,3 @@ variable "max_instances" {
   default     = 10
 }
 
-# ─── Observability (golden path) ─────────────────────────────────────────────
-
-variable "alert_notification_emails" {
-  description = "Email addresses that receive Cloud Monitoring alerts. Empty list = alert policies still created, no channel attached."
-  type        = list(string)
-  default     = []
-}
-
-variable "error_rate_threshold" {
-  description = "Errors per minute that trip the high-error-rate alert."
-  type        = number
-  default     = 5
-}

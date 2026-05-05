@@ -20,12 +20,3 @@ output "dashboard_url" {
   value       = module.observability.dashboard_url
 }
 
-output "alert_policy_error_rate" {
-  description = "Resource ID of the high-error-rate alert policy."
-  value       = module.observability.alert_policy_error_rate
-}
-
-output "alert_policy_uptime" {
-  description = "Resource ID of the uptime-failure alert policy (null if no host configured)."
-  value       = module.observability.alert_policy_uptime
-}

@@ -286,9 +286,11 @@ jobs:
   deploy:
     name: Deploy new image
     runs-on: ubuntu-latest
-    if: >-
-      (github.event_name == 'workflow_call' && inputs.image_ref != '') ||
-      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply' && inputs.image_ref != '')
+    # inputs.image_ref is only populated via workflow_call (from build-image.yml) or
+    # a manual workflow_dispatch with image_ref set. github.event_name in a called
+    # workflow reflects the CALLER's event (e.g. workflow_run), not 'workflow_call',
+    # so we check the input directly rather than the event name.
+    if: inputs.image_ref != ''
     environment: production
     permissions:
       contents: read
