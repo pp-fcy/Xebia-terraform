@@ -20,7 +20,7 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-HELLO_MESSAGE: str = os.environ.get("HELLO_MESSAGE", "Hello World !!!")
+HELLO_MESSAGE: str = os.environ.get("HELLO_MESSAGE", "Hello World and Welcome to FinCore !!!")
 HEALTH_MESSAGE: str = os.environ.get("HEALTH_MESSAGE", "ok")
 
 
