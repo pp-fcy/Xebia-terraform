@@ -229,6 +229,12 @@ ROLES=(
   # Cloud Build: submit image builds
   roles/cloudbuild.builds.editor
 
+  # Cloud Logging: create/update log-based metrics (used by observability module)
+  roles/logging.configWriter
+
+  # Cloud Monitoring: create/update dashboards (used by observability module)
+  roles/monitoring.editor
+
   # List project resources (needed in some org / VPC-SC setups)
   roles/browser
 )
