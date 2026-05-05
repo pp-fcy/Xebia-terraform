@@ -11,5 +11,5 @@
 #   terraform init -backend-config=env/dev.backend.hcl
 ##############################################################################
 
-bucket = "cfan-bux-tfstate"
-prefix = "what-time-is-it/dev/state"
+bucket = "cfan-dev-tfstate"
+prefix = "hello-world/dev/state"

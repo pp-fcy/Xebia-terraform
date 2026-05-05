@@ -77,7 +77,6 @@ curl localhost:8080/healthz
 | `pre-commit.yml` | PR / push to main | Terraform fmt/validate/tflint, secret scan (gitleaks), Checkov IaC + Dockerfile + Actions scan |
 | `build-image.yml` | Push to main touching `hello-world/` | Cloud Build → Trivy CVE scan → Terraform deploy → smoke test |
 | `terraform.yml` | Push to main touching `terraform/` | Terraform plan (on PR) / apply (on merge) |
-| `destroy.yml` | Manual only | Destroy all resources (requires typing `destroy` to confirm) |
 
 ## Environments
 
