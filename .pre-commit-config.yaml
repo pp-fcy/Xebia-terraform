@@ -41,8 +41,6 @@ repos:
 
       - id: terraform_validate
         files: ^terraform/.*\.tf$
-        args:
-          - --init-args=-reconfigure
 
       - id: terraform_tflint
         args:

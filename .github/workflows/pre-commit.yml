@@ -25,6 +25,7 @@ jobs:
     env:
       # Global provider cache dir picked up by every `terraform init` in hooks
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+      TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE: "true"
 
     steps:
       - name: Checkout
