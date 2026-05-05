@@ -23,4 +23,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/healthz')"
 
-CMD ["python", "-u", "server.py"]
+ENTRYPOINT ["python", "-u", "/app/server.py"]
